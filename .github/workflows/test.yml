@@ -12,11 +12,16 @@ jobs:
       matrix:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: diagnose stand-in server start
+        run: |
+          time python3 -c 'import http.server, socketserver; s = http.server.HTTPServer(("127.0.0.1", 0), http.server.BaseHTTPRequestHandler); print("bound", s.server_port)'
+          timeout 120 bash tests/lib.test.sh 2>&1 | tail -20 || true
       - name: bash suite
         run: bash tests/run-all.sh
       - name: smoke
@@ -26,6 +31,7 @@ jobs:
   # differs there: imports, the key file, the hook through Git Bash, the studio.
   windows:
     runs-on: windows-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
