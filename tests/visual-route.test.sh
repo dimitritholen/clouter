@@ -143,6 +143,12 @@ check_eq "svg prompt: Jev probabilities in the labels" "$(ctx | grep -c 'Jev 0\.
 check_eq "svg prompt: stay-with-Claude option is fourth" "$(ctx | grep -c '^4\. Stay with Claude')" "1"
 check_eq "svg prompt: asks with AskUserQuestion" "$(ctx | grep -c 'AskUserQuestion')" "1"
 check_eq "svg prompt: names generate.py with modality" "$(ctx | grep -c 'generate.py" --model <chosen id> --modality vector_svg')" "1"
+check_eq "svg prompt: generate.py runs with --no-critique" "$(ctx | grep -c -- '--no-critique')" "1"
+check_eq "svg prompt: names studio.py push" "$(ctx | grep -c 'studio.py" push')" "1"
+check_eq "svg prompt: names studio.py wait" "$(ctx | grep -c 'studio.py wait --session')" "1"
+check_eq "svg prompt: suggests defects before pushing (vector)" "$(ctx | grep -c -- '--suggest --model <chosen id> --out <defects.json>')" "1"
+check_eq "svg prompt: push carries --defects-file (vector)" "$(ctx | grep -c -- '--defects-file <defects.json> \[--message-file <note>\]')" "1"
+check_eq "svg prompt: points at the Studio loop in SKILL.md" "$(ctx | grep -c 'Studio loop.*SKILL.md')" "1"
 check_eq "svg prompt: command carries --request-file" "$(ctx | grep -c -- '--request-file')" "1"
 req_file="$(ctx | grep -o -- '--request-file [^ ]*' | head -n1 | cut -d' ' -f2)"
 check_eq "svg prompt: request file holds the prompt verbatim" "$(cat "$req_file")" "make me an SVG illustration of a fox"
@@ -160,9 +166,16 @@ check_eq "low model confidence: cheap to expensive" "$(ctx | grep -o '^[123]\. [
 run "Make a short video of a sunrise"
 check_eq "video prompt: per-second prices" "$(ctx | grep -c 'per second')" "2"
 check_eq "video prompt: veo first (cheapest, no recraft to pick)" "$(ctx | grep -c '^1\. google/veo-3.1-lite (Recommended)')" "1"
+check_eq "video prompt: names studio.py push" "$(ctx | grep -c 'studio.py" push')" "1"
+check_eq "video prompt: names studio.py wait" "$(ctx | grep -c 'studio.py wait --session')" "1"
+check_eq "video prompt: no --suggest (not raster/vector)" "$(ctx | grep -c -- '--suggest')" "0"
+check_eq "video prompt: no --defects-file (not raster/vector)" "$(ctx | grep -c -- '--defects-file')" "0"
 
 run "Narrate this paragraph with a warm voice"
 check_eq "speech prompt: per-character price" "$(ctx | grep -c 'per 1K characters')" "1"
+check_eq "speech prompt: names studio.py push" "$(ctx | grep -c 'studio.py" push')" "1"
+check_eq "speech prompt: names studio.py wait" "$(ctx | grep -c 'studio.py wait --session')" "1"
+check_eq "speech prompt: no --suggest (not raster/vector)" "$(ctx | grep -c -- '--suggest')" "0"
 
 run "I like the picture you painted with words, unsure though"
 check_code "low modality confidence: exit 0" "$code" 0
@@ -172,6 +185,8 @@ check_eq "low modality confidence: no catalogue fetch, no second Jev call" "$(re
 run "Explain how the image cache in this repo works"
 check_eq "prefilter hit but Jev says text_or_code: silent" "$out" ""
 check_eq "text_or_code: one Jev call only" "$(requests)" "1"
+check_eq "text_or_code: no studio.py push" "$(ctx | grep -c 'studio.py" push')" "0"
+check_eq "text_or_code: no studio.py wait" "$(ctx | grep -c 'studio.py wait')" "0"
 
 run "Split: a logo as an SVG and a transparent PNG"
 check_code "svg and png prompt: exit 0" "$code" 0
@@ -184,6 +199,9 @@ check_eq "svg and png prompt: Stay with Claude closes both questions" "$(ctx | g
 check_eq "svg and png prompt: prices in every model label" "$(ctx | grep -c '^[123]\. .*per 1K image tokens')" "$(ctx | grep -c '^[123]\. [a-z]*/')"
 check_eq "svg and png prompt: one generate.py run per format" "$(ctx | grep -c 'one run per format')" "1"
 check_eq "svg and png prompt: raster run carries --transparent" "$(ctx | grep -c -- '--transparent on the raster_image run')" "1"
+check_eq "svg and png prompt: names studio.py push" "$(ctx | grep -c 'studio.py" push')" "1"
+check_eq "svg and png prompt: names studio.py wait" "$(ctx | grep -c 'studio.py wait --session')" "1"
+check_eq "svg and png prompt: points at the Studio loop in SKILL.md" "$(ctx | grep -c 'Studio loop.*SKILL.md')" "1"
 check_eq "svg and png prompt: one modality call, then two catalogue fetches and two model calls" "$(jq -r '.method + " " + (if .body.questions.model then "model" elif .body then "modality" else .path end)' "$work/requests.jsonl" | sort | tr '\n' ';')" "GET /api/v1/models?output_modalities=image;GET /api/v1/models?output_modalities=image;POST modality;POST model;POST model;"
 check_eq "svg and png prompt: a model question per modality" "$(jq -r 'select(.body.questions.model) | .body.state.modality' "$work/requests.jsonl" | sort | tr '\n' ' ')" "raster_image vector_svg "
 
@@ -196,6 +214,9 @@ check_code "transparent PNG prompt: exit 0" "$code" 0
 check_eq "transparent PNG prompt: single raster question" "$(ctx | grep -c 'asks for a raster image')" "1"
 check_eq "transparent PNG prompt: only the alpha model listed" "$(ctx | grep -o '^[0-9]\. [a-z]*/[^ ]*' | tr '\n' ' ')" "1. openai/gpt-image-1 "
 check_eq "transparent PNG prompt: command carries --transparent" "$(ctx | grep -c -- '--modality raster_image --prompt-file <path to the design brief> --transparent')" "1"
+check_eq "transparent PNG prompt: names studio.py push" "$(ctx | grep -c 'studio.py" push')" "1"
+check_eq "transparent PNG prompt: names studio.py wait" "$(ctx | grep -c 'studio.py wait --session')" "1"
+check_eq "transparent PNG prompt: suggests defects before pushing (raster)" "$(ctx | grep -c -- '--suggest --model <chosen id> --out <defects.json>')" "1"
 
 run "Wordy: explain which logo image format suits a letterhead"
 check_code "text_or_code majority: exit 0" "$code" 0

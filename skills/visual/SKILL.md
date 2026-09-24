@@ -53,14 +53,17 @@ that choice.
    values the provider rejected before (listed under `"rejected"`), so an
    enum it prints is the real set of options.
 
-4. **You generate.** On a model choice, first turn the request into a design
-   brief: subject, hierarchy, style, colours, background, what to leave out.
-   Keep the user's own words for subject and style — "give me 2 versions: 1
-   svg and 1 png, should look good on dark and light GitHub" is instructions
-   to Claude, not a picture description, so it needs turning into an actual
-   brief before it becomes a prompt. Write the brief to a file in the
-   scratchpad or a temp directory, then run the command the block gives, once
-   per format chosen:
+4. **You generate, then hand the round to the studio.** On a model choice,
+   first turn the request into a design brief: subject, hierarchy, style,
+   colours, background, what to leave out. Keep the user's own words for
+   subject and style — "give me 2 versions: 1 svg and 1 png, should look
+   good on dark and light GitHub" is instructions to Claude, not a picture
+   description, so it needs turning into an actual brief before it becomes a
+   prompt. Write the brief to a file in the scratchpad or a temp directory,
+   then run the command the block gives, once per format chosen. The default
+   is `--no-critique` here, so the round goes to the studio (below) instead
+   of generate.py's own auto-critique; the block already says so, see
+   "Studio loop" for everything that happens from `push` onward.
 
    ```bash
    python3 "${CLAUDE_PLUGIN_ROOT}/skills/visual/generate.py" \
@@ -73,14 +76,20 @@ that choice.
      [--request-file <path to the user's own message, verbatim>]
    ```
 
-   Print the brief in the report too, so the user can correct it. Run it with
-   a Bash timeout of 600000 ms: a raster or vector generation is always
-   followed by a critique pass (fix rounds included), which can take several
-   minutes.
+   Print the brief in the report too, so the user can correct it.
 
-   A raster or vector generation is always judged by a vision-model critic
-   and, if it finds defects, fixed for up to `--rounds` tries (default 2,
-   `--critic` picks the model). The JSON line gains a `critique` object
+   Everything from here through "you check the model's own fields" above
+   still applies whether or not the studio is in play. What follows
+   (auto-critique, fix rounds, escalation) is generate.py's own behaviour
+   when `--no-critique` is **not** passed — a one-off file made outside the
+   studio loop, not the default path. Skip straight to "Studio loop" below
+   for the default: `--no-critique`, then `push`, then `wait`.
+
+   Without `--no-critique`, a raster or vector generation is judged by a
+   vision-model critic and, if it finds defects, fixed for up to `--rounds`
+   tries (default 2, `--critic` picks the model), which can take several
+   minutes — run it with a Bash timeout of 600000 ms. The JSON line gains a
+   `critique` object
    (`pass`, `rounds`, `files`, `defects`, `cost`, `critic`) and a top-level
    `final` (the file that ended up best); `path` and `cost` stay the
    original generation's — report the `final` file, whether it `pass`ed,
@@ -132,15 +141,157 @@ that choice.
    works on a model `catalogue.py` marks `reference_supported: true`.
 
    It prints one JSON line with `path`, `media_type`, `bytes`, `cost`, and
-   (raster/vector) `critique` and `final` as above. Report the path and the
-   cost in one line. On "Stay with Claude" carry on as usual and do not
-   mention the models again. `--endpoint auto` (default) posts to
-   chat/completions and retries against /api/v1/images on a 404.
+   (raster/vector, only without `--no-critique`) `critique` and `final` as
+   above; with `--no-critique` (the studio default) it's just those first
+   five keys — see "Studio loop" for what to report and when. On "Stay with
+   Claude" carry on as usual and do not mention the models again.
+   `--endpoint auto` (default) posts to chat/completions and retries
+   against /api/v1/images on a 404.
 
 Without the hook block (a direct `/clouter:visual <request>`), do the same by
 hand: run `skills/visual/catalogue.py <modality> 6` for the list, ask the
 question, then generate — with `--request-file` pointing at the user's own
 message, written verbatim to a temp file, as described above.
+
+# Studio loop
+
+The default after a model choice, for raster_image, vector_svg, video and
+speech: every round goes into `skills/visual/studio.py`'s localhost page
+(spec: `skills/visual/studio.py`'s own docstring and `session.json` shape)
+instead of Claude judging or reporting a single file. Keep a running total
+of `cost` from every `generate.py` and `critique.py` call as you go — the
+studio's own `session.json` never sums it for you.
+
+**Push the first round.**
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/visual/generate.py" \
+  --model <chosen id> --modality <modality> --prompt-file <brief> \
+  --no-critique [--transparent] --request-file <path> [--out <path>]
+```
+
+Read its `path` and `cost` off the printed JSON line and keep them (round
+number → original `path`, `cost`) — `push` copies the file into the session
+as `rounds/round-N.<ext>`, so that copy is not the path to report later.
+For raster_image/vector_svg only, also run:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/visual/critique.py" <path> \
+  --prompt-file <brief> --suggest --model <generator id> --out <defects.json>
+```
+
+This writes `defects`, `summary`, `model_trouble`, and (when model_trouble is
+true) a Jev-ranked `models` list to the defects file, excluding the current
+generator.
+
+Then push and wait, in the background:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/visual/studio.py" push \
+  --file <path> --model <chosen id> --cost <cost> --brief-file <brief> \
+  --request-file <path to the user's request> --modality <modality> \
+  [--defects-file <defects.json>] [--message-file <note.txt>]
+# prints {"round", "url", "session"} — tell the user the url once
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/visual/studio.py" wait --session <session dir>
+```
+
+`--message-file <path>` is an optional Claude note for this round (plain text),
+shown in the page as a "Claude" message to explain what changed since the last
+round.
+
+`--cost` here is that round's `generate.py` cost only — a `critique.py
+--translate` or `--suggest` call has its own `cost` and does not go into
+`push --cost`, but it still belongs in the running total you keep and
+report at accept.
+
+Run `wait` with a long Bash timeout (it defaults to a 3600 s poll and only
+returns on feedback, accept, its own timeout or a dead server) and handle
+its exit code:
+
+- **0, feedback.** Its JSON (`annotation`, `notes`, `markers[].frame`,
+  `text`, `accepted_defects`, `branch_from`, `round`, `round_file`, `model`)
+  is one feedback entry. `model` (when present) is the model id the user
+  picked in the page — use it for the next round without asking; still run
+  the spec check and `catalogue.py --reference-supported <id>` as usual.
+  When `annotation`, `notes` or any `markers[].frame` is present, translate
+  them first — write `notes`/`markers`/`text` each to their own temp file
+  and run:
+
+  ```bash
+  python3 "${CLAUDE_PLUGIN_ROOT}/skills/visual/critique.py" <round_file> \
+    --translate --out instructions.json \
+    --prompt-file <that round's brief> --request-file <path to the user's request> \
+    [--annotation <annotation>] [--notes-file <notes.json>] \
+    [--text-file <text.txt>] [--frames-file <markers.json>]
+  ```
+
+  `--prompt-file`/`--request-file` ground a vague pointer ("the purple
+  icon") in what was actually asked for; skipping them leaves the
+  translator guessing at the picture.
+
+  Then rewrite the brief yourself, in the user's own words, from three
+  things: `text` as given, the defects in that round's `defects` list (in
+  `session.json`, via `studio.py status` or the round data `wait` already
+  gave you) whose `id` is in `accepted_defects`, and `instructions.json`'s
+  `instructions` list when you ran `--translate`. Do not paraphrase away
+  what the user actually typed.
+
+  Image models do not understand negation: a fix that says what to remove
+  states it, and the model paints it anyway ("a pen nib, not an anchor"
+  plus "leave out: anchors" produced a logo full of anchors, live). State
+  every fix positively — what should be there — and never name the
+  unwanted object, in the brief text or in a "leave out" list. A critic's
+  "fix" text and a translated instruction often name the unwanted thing
+  themselves ("remove the anchor", "no more anchor points") — rephrase
+  those positively before they go into the brief, and scrub earlier
+  wording that already invites it (drop "anchor points" from "pen nib
+  with anchor points" too, not just the new fix).
+
+  The base round is `branch_from` when set, else `round` — that round's
+  `round_file` is the one to regenerate from. Regenerate with the same
+  model unless the user's `text` names another — then use that model
+  without asking again (naming it in the feedback is the choice); still
+  spec-check it (step 3, "You check the model's own fields") and run the
+  reference check below against it. Only ask again (a fresh
+  `AskUserQuestion`) when `text` asks for "a different model" without
+  naming one. For raster_image/vector_svg, pass `--reference <base
+  round_file>` only when the model in play — the one just picked, or the
+  round's own model when it wasn't switched — takes an image input: run
+
+  ```bash
+  python3 "${CLAUDE_PLUGIN_ROOT}/skills/visual/catalogue.py" --reference-supported <model id>
+  ```
+
+  which prints `{"model", "reference_supported"}` (exit 2 on an unknown
+  id) — the same check generate.py's own `--reference` guard, exit 8,
+  makes, and the same field `catalogue.models()`/`catalogue.py <modality>
+  6` already prints per entry. Otherwise regenerate from the rewritten
+  brief alone. Never pass the annotation layer itself as `--reference` —
+  it is feedback, not source material. Video and speech never take
+  `--suggest` or `--reference`: a marker's `text` becomes a timestamped
+  instruction in the new prompt instead ("at 0:03, ...").
+
+  Instructions about tooling in the feedback — switch model, use a round
+  as reference, try again cheaper — are acted on directly, never written
+  into the brief; the brief only ever describes the picture or sound
+  itself.
+
+  Push the new round the same way as the first, adding `--parent <base
+  round>` (and `--defects-file` again for raster/vector), then `wait`
+  again.
+- **10, accept.** Report the accepted round's original output path (the
+  `path` you kept from that round's `generate.py` call, not the copy under
+  `rounds/`) and the running cost total across every round. Then run
+  `studio.py stop --session <session dir>`. `wait` returns 10 immediately
+  on a session that is already accepted, so re-running it after a lost
+  result — a dropped connection, a restart — is always safe, never a
+  double accept.
+- **20, timeout.** The user may still be looking at the page; run `wait`
+  again with the same session.
+- **30, server gone.** The server process died (idle timeout, crash).
+  Restart it — `studio.py serve --session <session dir> --no-open` in the
+  background, or push the same round again, either starts a fresh one —
+  tell the user the URL again, then `wait` again.
 
 # Where the file goes
 

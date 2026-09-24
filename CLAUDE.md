@@ -16,8 +16,12 @@ does and how to install it.
   `llms.txt`), `learned.py` (remembers per model what the provider
   rejected and what worked, `learned.json`), `generate.py` (writes the
   file, logs cost), `critique.py`
-  (vision-model critic and fix rounds), `preview.py` (light/dark contact
+  (vision-model critic and fix rounds), `studio.py` (interactive browser
+  studio for image/video/audio editing and feedback), `preview.py` (light/dark contact
   sheet), `setup-key.py` (one-time OAuth key setup).
+- `skills/visual/studio/` — studio UI files: `index.html`, `studio.css`,
+  `app.js` (round history and feedback), `editor.js` (image annotation),
+  `timeline.js` (video and audio markers).
 - `lib/` — shared helpers: `jev.py` (HTTP client for Jev/TypeSafe),
   `keys.py` (credentials file read/write), `png.py` (PNG decode/encode,
   bbox trim).
@@ -42,4 +46,6 @@ or reach for a package that isn't in the stdlib.
 ## No network in tests
 
 The test suite does not talk to the network. Stub or fake anything that
-would otherwise call OpenRouter or Jev.
+would otherwise call OpenRouter or Jev. The `tests/studio.test.sh` suite
+starts the studio server on 127.0.0.1, which is allowed; nothing leaves
+the machine.

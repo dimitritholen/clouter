@@ -138,6 +138,17 @@ check_eq "limit argument cuts the list" "$(printf '%s' "$out" | jq 'length')" "1
 OPENROUTER_API_KEY=k run speech
 check_eq "key present: sent as bearer" "$(grep -c 'speech Bearer k$' "$work/requests.log")" "1"
 
+run --reference-supported openai/gpt-5-image-mini
+check_code "--reference-supported: known model, exit 0" "$code" 0
+check_eq "--reference-supported: true for an image-input model" "$out" '{"model": "openai/gpt-5-image-mini", "reference_supported": true}'
+
+run --reference-supported openai/gpt-image-1
+check_code "--reference-supported: known model without image input, exit 0" "$code" 0
+check_eq "--reference-supported: false for a text-only model" "$out" '{"model": "openai/gpt-image-1", "reference_supported": false}'
+
+run --reference-supported no/such-model
+check_code "--reference-supported: unknown model id, exit 2" "$code" 2
+
 run nope
 check_code "unknown modality: usage exit 2" "$code" 2
 OPENROUTER_BASE_URL="http://127.0.0.1:1" run video

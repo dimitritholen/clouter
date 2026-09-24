@@ -44,6 +44,18 @@ def critic_answer(model):
                             {"type": "other", "where": "c", "box": None, "severity": 5, "fix": "fix c"}]
         return False, [{"type": "other", "where": "d", "box": None, "severity": 4, "fix": "fix d"},
                         {"type": "other", "where": "e", "box": None, "severity": 2, "fix": "fix e"}]
+    if model == "acme/critic-worse-each":
+        # every round scores worse than the one before: 3, 4, 5, ...
+        return False, [{"type": "other", "where": f"round {n}", "box": None, "severity": min(5, n + 2), "fix": f"fix {n}"}]
+    if model == "acme/critic-equal":
+        return False, [{"type": "other", "where": "same", "box": None, "severity": 3, "fix": "fix it"}]
+    if model == "acme/critic-suggest":
+        return False, [{"type": "text_content", "where": "title", "box": [0.1, 0.1, 0.5, 0.2], "severity": 4,
+                        "fix": "spell the title right", "extra": "dropped"},
+                       {"type": "spacing", "where": "icons", "box": None, "severity": 2, "fix": "even the gaps"}]
+    if model == "acme/critic-suggest-trouble":
+        return False, [{"type": "prompt_adherence", "where": "missing element", "box": None, "severity": 5,
+                        "fix": "add the missing element"}]
     raise ValueError(f"stand-in: no script for critic model {model}")
 
 
@@ -118,7 +130,7 @@ class Handler(BaseHTTPRequestHandler):
             # cheapest-first order rank_models hands back.
             sort_probs = {"acme/gen-sort-a": 0.01, "acme/gen-sort-b": 0.66,
                           "acme/gen-sort-c": 0.0, "acme/gen-sort-d": 0.33, "acme/gen-sort-e": 0.0}
-            if set(ids) & set(sort_probs):
+            if set(ids) == set(sort_probs):
                 pick = "acme/gen-sort-b"
                 conf = sort_probs[pick]
                 probs = {i: sort_probs.get(i, 0.0) for i in ids}
@@ -145,6 +157,26 @@ class Handler(BaseHTTPRequestHandler):
                 content = json.dumps({"pass": True, "defects": []})
                 self.send_json(200, {"choices": [{"message": {"role": "assistant", "content": content}}],
                                      "usage": {"cost": 0.001}}); return
+            if model == "acme/critic-suggest-explicit-false":
+                content = json.dumps({"pass": False, "summary": "The fox looks right overall.",
+                                      "model_trouble": False,
+                                      "defects": [{"type": "prompt_adherence", "where": "tail", "box": None,
+                                                   "severity": 5, "fix": "add the tail"}]})
+                self.send_json(200, {"choices": [{"message": {"role": "assistant", "content": content}}],
+                                     "usage": {"cost": 0.002}}); return
+            if model == "acme/critic-suggest-explicit-true":
+                content = json.dumps({"pass": False, "summary": "Small spacing issue, otherwise fine.",
+                                      "model_trouble": True,
+                                      "defects": [{"type": "spacing", "where": "icons", "box": None,
+                                                   "severity": 2, "fix": "even the gaps"}]})
+                self.send_json(200, {"choices": [{"message": {"role": "assistant", "content": content}}],
+                                     "usage": {"cost": 0.002}}); return
+            if model == "acme/critic-translate":
+                content = json.dumps({"instructions": [
+                    {"where": "the sky", "box": [0, 0, 1, 0.3], "instruction": "make the sky darker", "source": "pen"},
+                    {"where": "the dog", "box": None, "instruction": "remove the dog", "source": "note"}]})
+                self.send_json(200, {"choices": [{"message": {"role": "assistant", "content": content}}],
+                                     "usage": {"cost": 0.003}}); return
             passed, defects = critic_answer(model)
             content = json.dumps({"pass": passed, "defects": defects})
             self.send_json(200, {"choices": [{"message": {"role": "assistant", "content": content}}],
@@ -447,5 +479,211 @@ check_eq "--request escalation: request file holds the exact request text" "$(ca
 printf '%s' "$REQUEST_TEXT" > "$work/request.txt"
 run original.png --prompt "A red fox" --model acme/gen --critic acme/critic-pass --request "$REQUEST_TEXT" --request-file "$work/request.txt"
 check_code "--request and --request-file together: exit 2" "$code" 2
+
+# --- best round: every round worse than the last -> the original stays final -------
+run original.png --prompt "A blue jay" --model acme/gen --critic acme/critic-worse-each --rounds 2
+check_code "worse each round: exit 0" "$code" 0
+check_eq "worse each round: both rounds used" "$(field .rounds)" "2"
+check_eq "worse each round: final is the original" "$(field .final)" "original.png"
+check_eq "worse each round: final defects are the original's" "$(field '.defects[0].where')" "round 1"
+worse_command="$(field .escalation.command)"
+check_eq "worse each round: escalation starts from the chosen final file" \
+  "$(printf '%s' "$worse_command" | cut -d' ' -f3)" "original.png"
+
+# --- best round: equal scores -> the earliest file wins ------------------------------
+run original.png --prompt "A blue jay" --model acme/gen --critic acme/critic-equal --rounds 2
+check_code "equal scores: exit 0" "$code" 0
+check_eq "equal scores: three files judged" "$(field '.files | length')" "3"
+check_eq "equal scores: final is the earliest (the original)" "$(field .final)" "original.png"
+check_eq "equal scores: escalation starts from the original" \
+  "$(field .escalation.command | cut -d' ' -f3)" "original.png"
+
+# --- best round: a seeded first result competes too ---------------------------------
+cat > "$work/seed-sev3.json" <<'EOF'
+[{"type": "other", "where": "seeded", "box": null, "severity": 3, "fix": "fix it"}]
+EOF
+run original.png --prompt "A blue jay" --model acme/gen --critic acme/critic-equal --defects-file "$work/seed-sev3.json" --rounds 1
+check_code "seeded tie: exit 0" "$code" 0
+check_eq "seeded tie: the seeded original wins the tie" "$(field .final)" "original.png"
+check_eq "seeded tie: final defects are the seeded ones" "$(field '.defects[0].where')" "seeded"
+
+# --- --suggest: judge once, ids, no generator, no escalation ------------------------
+run original.png --prompt "A red fox" --suggest --critic acme/critic-suggest --out "$work/suggest/defects.json"
+check_code "--suggest: exit 0" "$code" 0
+check_eq "--suggest: stdout names the out file" "$(field .out)" "$work/suggest/defects.json"
+check_eq "--suggest: stdout carries the critic cost" "$(field .cost)" "0.002"
+check_eq "--suggest: stdout names the critic" "$(field .critic)" "acme/critic-suggest"
+check_eq "--suggest: ids d1, d2 in order" "$(jq -r '.defects | map(.id) | join(",")' "$work/suggest/defects.json")" "d1,d2"
+check_eq "--suggest: fields kept" "$(jq -c '.defects[0]' "$work/suggest/defects.json")" \
+  '{"id":"d1","type":"text_content","where":"title","box":[0.1,0.1,0.5,0.2],"severity":4,"fix":"spell the title right"}'
+check_eq "--suggest: file holds defects, summary, model_trouble, no models (not in trouble)" \
+  "$(jq -c 'keys' "$work/suggest/defects.json")" '["defects","model_trouble","summary"]'
+check_eq "--suggest: summary empty when the critic didn't give one" "$(jq -r '.summary' "$work/suggest/defects.json")" ""
+check_eq "--suggest: model_trouble false (no severe prompt_adherence defect)" \
+  "$(jq -r '.model_trouble' "$work/suggest/defects.json")" "false"
+check_eq "--suggest: exactly one request, the critic" "$(wc -l < "$work/requests.jsonl" | tr -d ' ')" "1"
+check_eq "--suggest: no generator request" "$(jq -c 'select(.body.messages[0].role != "system")' "$work/requests.jsonl" | wc -l | tr -d ' ')" "0"
+check_eq "--suggest: the critic call asks for summary and model_trouble" \
+  "$(jq -c 'select(.body.model=="acme/critic-suggest")' "$work/requests.jsonl" | jq -r '.body.messages[0].content' | grep -c '"model_trouble"')" "1"
+
+run original.png --prompt "A red fox" --suggest --critic acme/critic-suggest
+check_code "--suggest without --out: exit 2" "$code" 2
+run original.png --suggest --critic acme/critic-suggest --out "$work/x.json"
+check_code "--suggest without a prompt: exit 2" "$code" 2
+run original.png --prompt "A red fox" --critic acme/critic-pass
+check_code "judge mode still requires --model: exit 2" "$code" 2
+
+# --- --suggest: model_trouble derived from a severe prompt_adherence defect, models offered ---
+run original.png --prompt "A red fox" --suggest --critic acme/critic-suggest-trouble --model acme/gen \
+  --out "$work/suggest-trouble/defects.json"
+check_code "--suggest, derived model_trouble: exit 0" "$code" 0
+check_eq "--suggest, derived model_trouble: true" "$(jq -r '.model_trouble' "$work/suggest-trouble/defects.json")" "true"
+check_eq "--suggest, derived model_trouble: models present" \
+  "$(jq 'has("models")' "$work/suggest-trouble/defects.json")" "true"
+check_eq "--suggest, derived model_trouble: at least one, at most 4 models" \
+  "$(jq '.models | length >= 1 and length <= 4' "$work/suggest-trouble/defects.json")" "true"
+check_eq "--suggest, derived model_trouble: --model excluded from the offered models" \
+  "$(jq -r '.models | map(.id) | index("acme/gen")' "$work/suggest-trouble/defects.json")" "null"
+check_eq "--suggest, derived model_trouble: recommended (Jev's pick) is first" \
+  "$(jq -r '.models[0].id' "$work/suggest-trouble/defects.json")" "acme/gen-best"
+check_eq "--suggest, derived model_trouble: each option carries reference_supported" \
+  "$(jq -c '.models | map(has("reference_supported")) | unique' "$work/suggest-trouble/defects.json")" "[true]"
+
+# --- --suggest: the critic's own explicit model_trouble overrides the derived one -----------
+run original.png --prompt "A red fox" --suggest --critic acme/critic-suggest-explicit-false --model acme/gen \
+  --out "$work/suggest-false/defects.json"
+check_code "--suggest, explicit false overrides a severe defect: exit 0" "$code" 0
+check_eq "--suggest, explicit false overrides a severe defect: model_trouble false" \
+  "$(jq -r '.model_trouble' "$work/suggest-false/defects.json")" "false"
+check_eq "--suggest, explicit false overrides a severe defect: summary carried through" \
+  "$(jq -r '.summary' "$work/suggest-false/defects.json")" "The fox looks right overall."
+check_eq "--suggest, explicit false overrides a severe defect: no models key" \
+  "$(jq 'has("models")' "$work/suggest-false/defects.json")" "false"
+
+run original.png --prompt "A red fox" --suggest --critic acme/critic-suggest-explicit-true --model acme/gen \
+  --out "$work/suggest-true/defects.json"
+check_code "--suggest, explicit true with mild defects: exit 0" "$code" 0
+check_eq "--suggest, explicit true with mild defects: model_trouble true" \
+  "$(jq -r '.model_trouble' "$work/suggest-true/defects.json")" "true"
+check_eq "--suggest, explicit true with mild defects: summary carried through" \
+  "$(jq -r '.summary' "$work/suggest-true/defects.json")" "Small spacing issue, otherwise fine."
+
+# --- --suggest: a ranking failure (no candidates for this modality) sets models_error, exit 0 --
+run shape.svg --prompt "A rectangle" --suggest --critic acme/critic-suggest-trouble --model acme/gen \
+  --out "$work/suggest-error/defects.json"
+check_code "--suggest, ranking failure: exit 0 (must not fail suggest)" "$code" 0
+check_eq "--suggest, ranking failure: model_trouble still true" \
+  "$(jq -r '.model_trouble' "$work/suggest-error/defects.json")" "true"
+check_eq "--suggest, ranking failure: no models key" "$(jq 'has("models")' "$work/suggest-error/defects.json")" "false"
+check_eq "--suggest, ranking failure: models_error present" \
+  "$(jq 'has("models_error")' "$work/suggest-error/defects.json")" "true"
+check_eq "--suggest, ranking failure: models_error names the ValueError" \
+  "$(jq -r '.models_error' "$work/suggest-error/defects.json" | grep -c ValueError)" "1"
+
+# --- --models: CLI-only ranking, honouring --exclude, no <file>, no critic call ------------
+exclude_list="acme/gen,acme/gen-noref,acme/gen-better,acme/gen-extra,acme/gen-noimage-hi,acme/gen-sort,acme/gen-sort-a,acme/gen-sort-b,acme/gen-sort-c,acme/gen-sort-d,acme/gen-sort-e"
+run --models --modality raster_image --prompt "A red fox" --exclude "$exclude_list" --out "$work/models-cli.json"
+check_code "--models: exit 0" "$code" 0
+check_eq "--models: stdout names the out file" "$(field .out)" "$work/models-cli.json"
+check_eq "--models: stdout has no critic key" "$(field 'has("critic")')" "false"
+check_eq "--models: file holds only models" "$(jq -c 'keys' "$work/models-cli.json")" '["models"]'
+check_eq "--models: excluded ids left out" \
+  "$(jq -r '.models | map(.id) | join(",")' "$work/models-cli.json" | grep -Ec 'acme/gen(,|$)|acme/gen-noref')" "0"
+check_eq "--models: remaining two candidates offered, recommended (best) first" \
+  "$(jq -r '.models | map(.id) | join(",")' "$work/models-cli.json")" "acme/gen-best,acme/gen-cheap"
+check_eq "--models: no critic call, only the decisions call" \
+  "$(jq -c 'select(.path=="/api/v1/chat/completions")' "$work/requests.jsonl" | wc -l | tr -d ' ')" "0"
+
+run --models --prompt "A red fox" --out "$work/models-nomodality.json"
+check_code "--models without --modality: exit 2" "$code" 2
+run --models --modality raster_image --out "$work/models-noprompt.json"
+check_code "--models without a prompt: exit 2" "$code" 2
+
+# --- --translate: clean image + composite + notes + text -> instructions ------------
+python3 - "$ROOT" <<'EOF_PNG'
+import sys
+sys.path.insert(0, sys.argv[1])
+from lib import png
+white = [bytearray(b"\xff\xff\xff\xff" * 4) for _ in range(4)]
+open("clean.png", "wb").write(png.encode(4, 4, white))
+layer = [bytearray(4 * 4) for _ in range(4)]
+layer[1][4:8] = b"\xff\x00\x00\xff"
+open("layer.png", "wb").write(png.encode(4, 4, layer))
+small = [bytearray(2 * 4) for _ in range(2)]
+small[0][0:4] = b"\x00\x00\xff\xff"
+open("layer-small.png", "wb").write(png.encode(2, 2, small))
+EOF_PNG
+cat > "$work/notes.json" <<'EOF'
+[{"n": 1, "x": 0.42, "y": 0.13, "text": "no dog here"}]
+EOF
+printf 'darker sky please' > "$work/text.txt"
+run clean.png --translate --annotation layer.png --notes-file "$work/notes.json" --text-file "$work/text.txt" \
+  --critic acme/critic-translate --out "$work/translate/instructions.json"
+check_code "--translate: exit 0" "$code" 0
+check_eq "--translate: stdout names the out file" "$(field .out)" "$work/translate/instructions.json"
+check_eq "--translate: stdout carries the cost" "$(field .cost)" "0.003"
+out_file="$work/translate/instructions.json"
+check_eq "--translate: instructions parsed" "$(jq -r '.instructions | map(.source) | join(",")' "$out_file")" "pen,note"
+check_eq "--translate: cost in the file" "$(jq -r '.cost' "$out_file")" "0.003"
+tr_body="$(jq -c 'select(.body.model=="acme/critic-translate")' "$work/requests.jsonl")"
+tr_content="$(printf '%s' "$tr_body" | jq -c '.body.messages[1].content')"
+check_eq "--translate: text + two images sent" "$(printf '%s' "$tr_content" | jq -r 'map(.type) | join(",")')" "text,image_url,image_url"
+printf '%s' "$tr_content" | jq -r '.[1].image_url.url' | sed 's/^data:image\/png;base64,//' | base64 -d > "$work/sent-clean.png"
+printf '%s' "$tr_content" | jq -r '.[2].image_url.url' | sed 's/^data:image\/png;base64,//' | base64 -d > "$work/sent-composite.png"
+check_eq "--translate: first image is the clean file" "$(cmp -s "$work/sent-clean.png" clean.png && echo same || echo different)" "same"
+check_eq "--translate: second image is the composite (red where drawn, white elsewhere)" \
+  "$(python3 -c "
+import sys; sys.path.insert(0, '$ROOT')
+from lib import png
+w, h, rows = png.decode(open('$work/sent-composite.png', 'rb').read())
+print(w, h, bytes(rows[1][4:8]).hex(), bytes(rows[0][0:4]).hex())")" "4 4 ff0000ff ffffffff"
+tr_text="$(printf '%s' "$tr_content" | jq -r '.[0].text')"
+check_eq "--translate: note pin with its fractions" "$(printf '%s' "$tr_text" | grep -Fc '1. at x=0.42, y=0.13: no dog here')" "1"
+check_eq "--translate: user's text sent" "$(printf '%s' "$tr_text" | grep -Fc 'darker sky please')" "1"
+check_eq "--translate: system asks for instructions JSON" \
+  "$(printf '%s' "$tr_body" | jq -r '.body.messages[0].content' | grep -c '"instructions"')" "1"
+check_eq "--translate: no generator request" "$(jq -c 'select(.body.messages[0].role != "system")' "$work/requests.jsonl" | wc -l | tr -d ' ')" "0"
+
+# --- --translate: a smaller layer is scaled to the image before compositing ---------
+run clean.png --translate --annotation layer-small.png --critic acme/critic-translate --out "$work/tr2.json"
+check_code "--translate, scaled layer: exit 0" "$code" 0
+jq -c 'select(.body.model=="acme/critic-translate")' "$work/requests.jsonl" | jq -r '.body.messages[1].content[2].image_url.url' \
+  | sed 's/^data:image\/png;base64,//' | base64 -d > "$work/sent-scaled.png"
+check_eq "--translate, scaled layer: top-left 2x2 block blue, rest white" \
+  "$(python3 -c "
+import sys; sys.path.insert(0, '$ROOT')
+from lib import png
+w, h, rows = png.decode(open('$work/sent-scaled.png', 'rb').read())
+print(w, h, bytes(rows[1][4:8]).hex(), bytes(rows[2][8:12]).hex())")" "4 4 0000ffff ffffffff"
+
+# --- --translate: a non-PNG clean image gets the layer sent separately --------------
+printf '\xff\xd8\xff\xe0fakejpeg' > clean.jpg
+run clean.jpg --translate --annotation layer.png --critic acme/critic-translate --out "$work/tr3.json"
+check_code "--translate, jpeg: exit 0" "$code" 0
+jpg_content="$(jq -c 'select(.body.model=="acme/critic-translate")' "$work/requests.jsonl" | jq -c '.body.messages[1].content')"
+check_eq "--translate, jpeg: clean image sent as jpeg" "$(printf '%s' "$jpg_content" | jq -r '.[1].image_url.url' | cut -c1-23)" "data:image/jpeg;base64,"
+printf '%s' "$jpg_content" | jq -r '.[2].image_url.url' | sed 's/^data:image\/png;base64,//' | base64 -d > "$work/sent-layer.png"
+check_eq "--translate, jpeg: layer sent as-is" "$(cmp -s "$work/sent-layer.png" layer.png && echo same || echo different)" "same"
+check_eq "--translate, jpeg: text says it is the layer alone" \
+  "$(printf '%s' "$jpg_content" | jq -r '.[0].text' | grep -c "pen layer alone")" "1"
+
+# --- --translate: video markers send their frames with timestamps -------------------
+printf 'not really a video' > clip.mp4
+cp layer.png frame1.png
+cat > "$work/frames.json" <<EOF
+[{"t": 18.2, "text": "the logo flickers", "frame": "frame1.png"}, {"t": 3, "text": "too loud", "frame": null}]
+EOF
+run clip.mp4 --translate --frames-file "$work/frames.json" --critic acme/critic-translate --out "$work/tr4.json"
+check_code "--translate, video markers: exit 0" "$code" 0
+vid_content="$(jq -c 'select(.body.model=="acme/critic-translate")' "$work/requests.jsonl" | jq -c '.body.messages[1].content')"
+check_eq "--translate, video markers: only the captured frame is sent as an image" \
+  "$(printf '%s' "$vid_content" | jq -r 'map(.type) | join(",")')" "text,image_url"
+check_eq "--translate, video markers: timestamps in the text" \
+  "$(printf '%s' "$vid_content" | jq -r '.[0].text' | grep -Ec 'at 18.2s: the logo flickers \(captured frame: image 1\)|at 3s: too loud')" "2"
+
+run clean.png --translate --critic acme/critic-translate --out "$work/tr5.json"
+check_code "--translate with nothing to translate: exit 2" "$code" 2
+run clean.png --translate --annotation missing.png --critic acme/critic-translate --out "$work/tr6.json"
+check_code "--translate with a missing layer: exit 2" "$code" 2
 
 exit $fail

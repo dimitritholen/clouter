@@ -1,3 +1,5 @@
+<p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.png"><img src="assets/logo-light.png" alt="Clouter" width="420"></picture></p>
+
 # clouter
 
 A standalone Claude Code plugin that routes prompts for images, SVGs, video
@@ -21,13 +23,33 @@ picked model's own `llms.txt` so the request stays valid and uses that
 model's own fields (resolution, seed, generate_audio, ...) rather than a
 generic guess; those go through generate.py's repeatable `--param
 key=value`, validated against the model's spec before anything is sent. A
-raster or vector generation is also judged by a vision-model critic and, if
-it finds defects, fixed for a few rounds before that report. When a model's
-`llms.txt` turns out wrong and generate.py's own fallback proves it (a speech
-model that rejects mp3 but takes pcm, an image model that only answers on
-`/api/v1/images`), that is remembered in `learned.json` for 30 days, so the
-next request goes right the first time and spec.py no longer offers the
-rejected value.
+raster or vector generation is also judged by a vision-model critic; if using
+the studio (see below), the critic suggests fixes the user can accept or
+dismiss; if using critique.py's normal mode, defects are fixed automatically
+for a few rounds. When a model's `llms.txt` turns out wrong and
+generate.py's own fallback proves it (a speech model that rejects mp3 but
+takes pcm, an image model that only answers on `/api/v1/images`), that is
+remembered in `learned.json` for 30 days, so the next request goes right the
+first time and spec.py no longer offers the rejected value.
+
+## Studio
+
+After picking a model, each generated image, SVG, video or speech clip opens
+in a browser page on `127.0.0.1`. Claude pushes each round and waits for your
+feedback: you can edit images with a pen tool (colour and line width), an
+eraser, and numbered note pins; mark up video or audio with timeline markers
+and notes; type new instructions in a feedback box; accept suggestions from
+the critic; or branch to explore a variant. The critic's translate mode turns
+your drawn annotations and markers into region-anchored instructions for the
+next prompt. Claude rewrites the brief from your feedback, regenerates (with
+the clean previous round as a reference image where appropriate), and pushes
+the next round, until you press Accept. Session state is saved in
+`~/.cache/clouter/studio/<id>/` (session.json, rounds/, uploads/).
+
+The critic's feedback appears in the page: a summary of the round, a note if
+the model is struggling with the brief, and (when it is) a picker for
+alternative models. You can always ask for a fresh set of Jev-ranked model
+choices, or pick any model from the catalogue by hand.
 
 ## Install
 
