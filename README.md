@@ -1,3 +1,5 @@
+<p align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="assets/logo-dark.png"><img src="assets/logo-light.png" alt="Clouter" width="420"></picture></p>
+
 # clouter
 
 A standalone Claude Code plugin that routes prompts for images, SVGs, video
