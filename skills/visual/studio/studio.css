@@ -427,6 +427,10 @@ textarea {
   margin: 0;
 }
 
+.branch-toggle[hidden] {
+  display: none;
+}
+
 .btn {
   padding: 8px 14px;
   border-radius: var(--radius);
@@ -599,8 +603,11 @@ textarea {
   padding: 16px;
   width: min(1000px, 95vw);
   max-height: 85vh;
-  display: flex;
   flex-direction: column;
+}
+
+.manual-model-dialog[open] {
+  display: flex;
 }
 
 .manual-model-dialog::backdrop {
