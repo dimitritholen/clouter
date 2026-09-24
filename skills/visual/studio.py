@@ -71,6 +71,7 @@ import os
 import re
 import shutil
 import signal
+import socketserver
 import subprocess
 import sys
 import threading
@@ -740,12 +741,20 @@ def open_browser(url):
         print(f"studio: could not open a browser: {e}", file=sys.stderr)
 
 
+class LocalServer(http.server.ThreadingHTTPServer):
+    def server_bind(self):
+        # HTTPServer.server_bind reverse-resolves the host (socket.getfqdn),
+        # which takes ~35s on a Mac with slow DNS, past SERVER_START_SECONDS.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
 def serve(d, no_open, idle_minutes):
     if not os.path.isfile(session_path(d)):
         raise UsageError(f"no session at {d}")
     studio = Studio(d, idle_minutes)
     handler = type("StudioHandler", (Handler,), {"studio": studio})
-    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    httpd = LocalServer(("127.0.0.1", 0), handler)
     httpd.daemon_threads = True
     httpd.block_on_close = False
     port = httpd.server_address[1]

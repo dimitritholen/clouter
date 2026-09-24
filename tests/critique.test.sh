@@ -189,6 +189,11 @@ class Handler(BaseHTTPRequestHandler):
                              "usage": {"cost": 0.01}}); return
 
 
+import socketserver
+def _bind(self):  # HTTPServer.server_bind reverse-resolves the host (getfqdn): 35s on a macOS runner
+    socketserver.TCPServer.server_bind(self)
+    self.server_name, self.server_port = self.server_address[:2]
+HTTPServer.server_bind = _bind
 server = HTTPServer(("127.0.0.1", 0), Handler)
 open(f"{work}/port", "w").write(str(server.server_port))
 server.serve_forever()
