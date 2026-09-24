@@ -58,7 +58,7 @@ check_eq "chrome got --screenshot" "$(grep -c -- '--screenshot=' "$work/chrome-a
 check_eq "chrome got --window-size" "$(grep -c -- '--window-size=' "$work/chrome-args")" "1"
 check_ge1 "HTML mentions #0d1117" "$(grep -c '#0d1117' "$work/sheet.html")"
 check_ge1 "HTML mentions #ffffff" "$(grep -c '#ffffff' "$work/sheet.html")"
-check_eq "HTML has one data URL per input (times two panes)" "$(grep -o 'data:' "$work/sheet.html" | wc -l)" "4"
+check_eq "HTML has one data URL per input (times two panes)" "$(grep -o 'data:' "$work/sheet.html" | wc -l | tr -d " ")" "4"
 check_ge1 "HTML names the PNG file" "$(grep -c 'one.png' "$work/sheet.html")"
 check_ge1 "HTML names the SVG file" "$(grep -c 'one.svg' "$work/sheet.html")"
 check_ge1 "HTML shows the SVG's viewBox dimensions" "$(grep -c '64.*32\|64.32' "$work/sheet.html")"
@@ -75,7 +75,7 @@ out=$(PATH="$work/bin-fail:$py_dir" "$SCRIPT" "$work/one.png" --out "$work/sheet
 code=$?
 check_code "failing browser: exit 0" "$code" 0
 check_eq "failing browser: prints the HTML path" "$out" "$work/sheet3.html"
-check_ge1 "failing browser: one stderr note" "$(wc -l < "$work/stderr")"
+check_ge1 "failing browser: one stderr note" "$(wc -l < "$work/stderr" | tr -d " ")"
 [ ! -e "$work/sheet3.png" ] && printf 'ok   failing browser: no PNG written\n' || { printf 'FAIL failing browser wrote a PNG anyway\n'; fail=1; }
 
 # --- missing input -------------------------------------------------------------

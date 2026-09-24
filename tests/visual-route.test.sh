@@ -124,7 +124,7 @@ run() { # prompt -> $out, $code, requests.jsonl reset
   rm -f "$work/requests.jsonl"
   out=$(jq -cn --arg p "$1" '{session_id: "s", transcript_path: "/t", cwd: "/c", hook_event_name: "UserPromptSubmit", prompt: $p}' | "$SCRIPT" 2>"$work/stderr"); code=$?
 }
-requests() { [ -f "$work/requests.jsonl" ] && wc -l < "$work/requests.jsonl" || echo 0; }
+requests() { [ -f "$work/requests.jsonl" ] && wc -l < "$work/requests.jsonl" | tr -d " " || echo 0; }
 ctx() { printf '%s' "$out" | jq -r '.hookSpecificOutput.additionalContext'; }
 
 run "Fix the failing test in auth.py and rename the helper"

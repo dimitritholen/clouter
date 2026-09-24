@@ -102,7 +102,7 @@ check_eq "callback page says done" "$(printf '%s' "$page" | grep -c 'The key is 
 finish
 check_code "good code: stored" "$code" 0
 check_eq "stdout says stored via oauth" "$(jq -c '[.status, .via]' "$work/stdout")" '["stored","oauth"]'
-check_eq "file mode 0600" "$(stat -c %a "$work/credentials")" "600"
+check_eq "file mode 0600" "$(stat -c %a "$work/credentials" 2>/dev/null || stat -f %Lp "$work/credentials")" "600"
 check_eq "file holds the key" "$(cat "$work/credentials")" "OPENROUTER_API_KEY=$GOOD_KEY"
 key_absent "key absent from stdout and stderr (oauth)"
 check_eq "exchange then key check" "$(jq -r '.method + " " + .path' "$work/requests.jsonl" | tr '\n' ';')" "POST /api/v1/auth/keys;GET /api/v1/key;"
@@ -141,7 +141,7 @@ finish
 check_code "paste: stored" "$code" 0
 check_eq "stdout says stored via paste" "$(jq -c '[.status, .via]' "$work/stdout")" '["stored","paste"]'
 check_eq "paste: file holds the key" "$(cat "$work/credentials")" "OPENROUTER_API_KEY=$GOOD_KEY"
-check_eq "paste: file mode 0600" "$(stat -c %a "$work/credentials")" "600"
+check_eq "paste: file mode 0600" "$(stat -c %a "$work/credentials" 2>/dev/null || stat -f %Lp "$work/credentials")" "600"
 key_absent "key absent from stdout and stderr (paste)"
 check_eq "paste: only the key check was called" "$(jq -r '.method + " " + .path' "$work/requests.jsonl" | tr '\n' ';')" "GET /api/v1/key;"
 
@@ -185,8 +185,8 @@ BROWSER="$work/fake-browser %s" "$SCRIPT" --timeout 1 >"$work/stdout" 2>"$work/s
 check_code "browser run: timed out as planned" "$code" 2
 check_eq "browser opened on the auth url" "$(cat "$work/opened-url" 2>/dev/null)" "$(jq -r .url "$work/stderr")"
 check_eq "browser_opened reported" "$(jq -r .browser_opened "$work/stderr")" "true"
-check_eq "stderr is one JSON line, no browser noise" "$(wc -l < "$work/stderr")" "1"
-check_eq "stdout is one JSON line, no browser noise" "$(wc -l < "$work/stdout")" "1"
+check_eq "stderr is one JSON line, no browser noise" "$(wc -l < "$work/stderr" | tr -d " ")" "1"
+check_eq "stdout is one JSON line, no browser noise" "$(wc -l < "$work/stdout" | tr -d " ")" "1"
 
 # --- --tty ---------------------------------------------------------------------------
 rm -f "$work/credentials" "$work/requests.jsonl"

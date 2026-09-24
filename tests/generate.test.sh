@@ -268,6 +268,14 @@ run --model acme/paint --modality raster_image --prompt "banner" --out out/wide.
 check_eq "--out never overwrites either" "$(field .path)" "out/wide-2.png"
 run --model acme/paint --modality raster_image --prompt "x" --out out/noext
 check_eq "--out without extension gets the media type's" "$(field .path)" "out/noext.png"
+run --model acme/paint --modality raster_image --prompt "square stub" --aspect 16:9
+check_eq "--aspect ignored by the model: stderr note" "$(grep -c 'asked for --aspect 16:9, the model returned 1x1' "$work/stderr")" "1"
+run --model acme/paint --modality raster_image --prompt "square stub" --aspect 1:1
+check_eq "--aspect honoured: no note" "$(grep -c 'asked for --aspect' "$work/stderr")" "0"
+run --model recraft/recraft-v4.1-vector --modality vector_svg --prompt "x" --out out/logo.png
+check_eq "--out with the wrong media extension follows the bytes" "$(field .path)" "out/logo.svg"
+run --model recraft/recraft-v4.1-vector --modality vector_svg --prompt "x" --out out/logo.v2
+check_eq "--out with a non-media extension keeps it" "$(field .path)" "out/logo.v2"
 
 # --- vector ------------------------------------------------------------------
 run --model recraft/recraft-v4.1-vector --modality vector_svg --prompt "Fox logo, flat"
@@ -329,7 +337,7 @@ check_eq "pcm-only, learned: still a wav" "$(field .media_type)" "audio/wav"
 run --model acme/tts-pcmonly --modality speech --prompt "Ask for mp3 anyway" --param response_format=mp3
 check_code "pcm-only, learned: --param response_format=mp3 refused, usage exit" "$code" 2
 check_eq "pcm-only, learned: refusal says the provider rejected it and names pcm" "$(grep -c 'response_format mp3 was rejected by the provider on .*; use one of: pcm' "$work/stderr")" "1"
-check_eq "pcm-only, learned: refused mp3 sends no request at all" "$([ -f "$work/requests.jsonl" ] && wc -l < "$work/requests.jsonl" || echo 0)" "0"
+check_eq "pcm-only, learned: refused mp3 sends no request at all" "$([ -f "$work/requests.jsonl" ] && wc -l < "$work/requests.jsonl" | tr -d " " || echo 0)" "0"
 
 run --model acme/tts --modality speech --prompt "Explicit pcm" --param response_format=pcm
 check_code "--param response_format=pcm: written" "$code" 0
@@ -354,7 +362,7 @@ check_code "API 500: exit 4" "$code" 4
 check_eq "API 500: message on stderr" "$(grep -c 'answered 500: stand-in exploded' "$work/stderr")" "1"
 OPENROUTER_API_KEY= run --model acme/paint --modality raster_image --prompt "x"
 check_code "no key: exit 3" "$code" 3
-check_eq "no key: no request" "$([ -f "$work/requests.jsonl" ] && wc -l < "$work/requests.jsonl" || echo 0)" "0"
+check_eq "no key: no request" "$([ -f "$work/requests.jsonl" ] && wc -l < "$work/requests.jsonl" | tr -d " " || echo 0)" "0"
 run --model acme/paint --modality hologram --prompt "x"
 check_code "bad modality: usage exit 2" "$code" 2
 run --model acme/paint --modality raster_image --prompt "   "
@@ -407,12 +415,12 @@ check_eq "--transparent: chat/completions never called" "$(jq -r '.path' "$work/
 run --model black-forest-labs/flux-2-klein --modality raster_image --prompt "A fox, no background" --transparent
 check_code "--transparent on a non-alpha model: new exit code 7" "$code" 7
 check_eq "--transparent refusal: reason on stderr" "$(grep -c 'no native alpha channel' "$work/stderr")" "1"
-check_eq "--transparent refusal: no request at all" "$([ -f "$work/requests.jsonl" ] && wc -l < "$work/requests.jsonl" || echo 0)" "0"
+check_eq "--transparent refusal: no request at all" "$([ -f "$work/requests.jsonl" ] && wc -l < "$work/requests.jsonl" | tr -d " " || echo 0)" "0"
 [ ! -e assets/a-fox-no-background.png ] && printf 'ok   --transparent refusal: nothing written\n' || { printf 'FAIL --transparent refusal wrote a file\n'; fail=1; }
 
 run --model recraft/recraft-v4.1-vector --modality vector_svg --prompt "A fox logo" --transparent
 check_code "--transparent on a non-raster modality: usage exit 2" "$code" 2
-check_eq "--transparent, non-raster: no request at all" "$([ -f "$work/requests.jsonl" ] && wc -l < "$work/requests.jsonl" || echo 0)" "0"
+check_eq "--transparent, non-raster: no request at all" "$([ -f "$work/requests.jsonl" ] && wc -l < "$work/requests.jsonl" | tr -d " " || echo 0)" "0"
 
 # --- SVG cleanup (#643) ---
 run --model recraft/recraft-v4.1-vector-messy --modality vector_svg --prompt "Fox logo, messy svg"
@@ -452,7 +460,7 @@ mv "$(field .path)" "$work/untrimmed.png"
 run --model acme/paint-trim --modality raster_image --prompt "Trim me, default margin" --trim
 check_code "--trim, default margin: written" "$code" 0
 untrimmed_size=$(stat -c%s "$work/untrimmed.png" 2>/dev/null || stat -f%z "$work/untrimmed.png")
-trimmed_size=$(stat -c%s "$(field .path)")
+trimmed_size=$(stat -c%s "$(field .path)" 2>/dev/null || stat -f%z "$(field .path)")
 check_eq "--trim, default margin 32 on a 40x30 canvas clamps to the full image" \
   "$([ "$trimmed_size" -gt 0 ] && echo yes || echo no)" "yes"
 
@@ -496,13 +504,13 @@ check_eq "--reference refusal: no generation request made" "$(grep -c 'chat/comp
 
 run --model acme/paint --modality raster_image --prompt "Missing reference" --reference "$work/no-such-file.png"
 check_code "--reference file missing: exit 2" "$code" 2
-check_eq "--reference missing: no request at all" "$([ -f "$work/requests.jsonl" ] && wc -l < "$work/requests.jsonl" || echo 0)" "0"
+check_eq "--reference missing: no request at all" "$([ -f "$work/requests.jsonl" ] && wc -l < "$work/requests.jsonl" | tr -d " " || echo 0)" "0"
 
 big_ref="$work/big.png"
 head -c $((20 * 1024 * 1024 + 1)) /dev/zero > "$big_ref"
 run --model acme/paint --modality raster_image --prompt "Too big" --reference "$big_ref"
 check_code "--reference over 20 MB: exit 2" "$code" 2
-check_eq "--reference over 20 MB: no request at all" "$([ -f "$work/requests.jsonl" ] && wc -l < "$work/requests.jsonl" || echo 0)" "0"
+check_eq "--reference over 20 MB: no request at all" "$([ -f "$work/requests.jsonl" ] && wc -l < "$work/requests.jsonl" | tr -d " " || echo 0)" "0"
 
 run --model acme/video --modality video --prompt "x" --reference "$ref_png"
 check_code "--reference on video: usage exit 2" "$code" 2
@@ -606,16 +614,16 @@ export CLOUTER_VISUAL_LOG="$log"
 
 run --model acme/paint --modality raster_image --prompt "Log me once"
 check_code "cost log: generation still written" "$code" 0
-check_eq "cost log: one line appended" "$(wc -l < "$log")" "1"
+check_eq "cost log: one line appended" "$(wc -l < "$log" | tr -d " ")" "1"
 logged="$(tail -n1 "$log")"
 check_eq "cost log: model/modality/cost recorded" "$(printf '%s' "$logged" | jq -c '[.model, .modality, .cost]')" '["acme/paint","raster_image",0.0192]'
-check_eq "cost log: path is absolute and matches the written file" "$(printf '%s' "$logged" | jq -r '.path')" "$(cd "$(dirname "$(field .path)")" && pwd)/$(basename "$(field .path)")"
+check_eq "cost log: path is absolute and matches the written file" "$(printf '%s' "$logged" | jq -r '.path')" "$(cd "$(dirname "$(field .path)")" && pwd -P)/$(basename "$(field .path)")"
 check_eq "cost log: ts looks like ISO-8601 UTC" "$(printf '%s' "$logged" | jq -r '.ts' | grep -Ec '^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$')" "1"
 check_eq "cost log: mode 0600" "$(stat -c%a "$log" 2>/dev/null || stat -f%Lp "$log")" "600"
 
 run --model acme/video --modality video --prompt "Log me twice" --duration 2
 check_code "cost log: second generation written" "$code" 0
-check_eq "cost log: two lines now" "$(wc -l < "$log")" "2"
+check_eq "cost log: two lines now" "$(wc -l < "$log" | tr -d " ")" "2"
 
 cost_out="$("$SCRIPT" --cost 2>"$work/stderr")"; cost_code=$?
 check_code "--cost: exit 0, no --model/--modality/--prompt needed" "$cost_code" 0
@@ -777,7 +785,7 @@ run --model recraft/recraft-v4-vector --modality vector_svg --prompt "Fox logo, 
 check_code "spec: images-only auto still validates aspect_ratio's enum, usage exit" "$code" 2
 check_eq "spec: bad aspect names the allowed values" "$(grep -c 'aspect_ratio must be one of' "$work/stderr")" "1"
 check_eq "spec: bad aspect on images-only auto sends no request at all" \
-  "$([ -f "$work/requests.jsonl" ] && wc -l < "$work/requests.jsonl" || echo 0)" "0"
+  "$([ -f "$work/requests.jsonl" ] && wc -l < "$work/requests.jsonl" | tr -d " " || echo 0)" "0"
 
 # --- --param cannot override a field generate.py already owns ---
 run --model google/veo-3.1 --modality video --prompt "Test clip" --param model=hijacked

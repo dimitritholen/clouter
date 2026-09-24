@@ -144,6 +144,7 @@ EXTENSIONS = {
     "audio/mpeg": "mp3", "audio/mp3": "mp3", "audio/wav": "wav", "audio/x-wav": "wav",
     "audio/ogg": "ogg", "audio/pcm": "pcm",
 }
+MEDIA_EXTS = set(EXTENSIONS.values()) | {"jpeg"}
 HTTP_TIMEOUT = 120.0
 VIDEO_WAIT = 900.0
 # Backoff after a speech generation while GET /api/v1/generation 404s: the
@@ -762,6 +763,44 @@ def trim_png(raw, margin):
     return png.encode(x1 - x0, y1 - y0, cropped)
 
 
+# --- did the model honour --aspect? ----------------------------------------------
+
+def image_dims(raw, ext):
+    """(width, height) from a PNG, WebP or SVG header, else None.
+    ponytail: no JPEG (needs a SOF marker scan), add when a model sends one."""
+    if ext == "png" and raw[12:16] == b"IHDR":
+        return int.from_bytes(raw[16:20], "big"), int.from_bytes(raw[20:24], "big")
+    if ext == "webp" and raw[:4] == b"RIFF":
+        chunk = raw[12:16]
+        if chunk == b"VP8X":
+            return int.from_bytes(raw[24:27], "little") + 1, int.from_bytes(raw[27:30], "little") + 1
+        if chunk == b"VP8 ":
+            return (int.from_bytes(raw[26:28], "little") & 0x3FFF,
+                    int.from_bytes(raw[28:30], "little") & 0x3FFF)
+        if chunk == b"VP8L":
+            bits = int.from_bytes(raw[21:25], "little")
+            return (bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1
+    if ext == "svg":
+        return preview.dims_svg(raw)
+    return None
+
+
+def aspect_mismatch(raw, ext, aspect):
+    """A one-line note when the file's shape is over 10% off the --aspect
+    asked for (some models ignore it silently), else None."""
+    try:
+        w, h = (float(n) for n in aspect.split(":"))
+        dims = image_dims(raw, ext)
+    except (ValueError, TypeError):
+        return None
+    if not dims or not dims[1] or not h:
+        return None
+    wanted, got = w / h, dims[0] / dims[1]
+    if abs(got - wanted) / wanted <= 0.1:
+        return None
+    return f"asked for --aspect {aspect}, the model returned {dims[0]}x{dims[1]} ({got:.2f}:1); crop it or try another model"
+
+
 # --- where the file goes ---------------------------------------------------------
 
 def slug(text, limit=60):
@@ -772,8 +811,12 @@ def slug(text, limit=60):
 def target_path(out, prompt, ext):
     if out:
         path = out
-        if not os.path.splitext(path)[1]:
+        root, given = os.path.splitext(path)
+        if not given:
             path = f"{path}.{ext}"
+        elif given[1:].lower() in MEDIA_EXTS and given[1:].lower().replace("jpeg", "jpg") != ext:
+            # --out prism.png on a WebP answer: the name follows the bytes.
+            path = f"{root}.{ext}"
     else:
         path = os.path.join("assets", f"{slug(prompt)}.{ext}")
     root, extension = os.path.splitext(path)
@@ -1049,6 +1092,10 @@ def main(argv):
     with open(path, "wb") as f:
         f.write(raw)
     log_generation(path, args.model, args.modality, cost)
+    if args.aspect:
+        note = aspect_mismatch(raw, ext, args.aspect)
+        if note:
+            print(f"generate: {note}", file=sys.stderr)
 
     result = {"path": path, "model": args.model, "modality": args.modality,
               "media_type": media_type, "bytes": len(raw), "cost": cost}

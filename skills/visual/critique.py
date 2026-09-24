@@ -26,8 +26,11 @@ a fixed checklist, and answers strict JSON: pass, and a list of defects
 each with a type, where, a normalised 0-1 bounding box or null, a 1-5
 severity and an imperative fix instruction. An SVG file is rasterised to
 PNG through preview.py's headless-Chrome machinery when a browser is on
-PATH; without one, the SVG source goes as a text part instead, noted as
-markup so the critic doesn't mistake it for prose.
+PATH, else through rsvg-convert or macOS's sips; with none of them, the
+SVG source goes as a text part instead, noted as markup so the critic
+doesn't mistake it for prose. Source over SVG_SOURCE_LIMIT bytes is
+refused instead (exit 2): a model's path-only SVG draws its text as
+outlines, so the critic can't read it and the tokens are wasted.
 
 --request/--request-file, when given, is the user's own message
 verbatim, sent to the critic as a second, clearly labelled section
@@ -153,6 +156,8 @@ import json
 import os
 import re
 import shlex
+import shutil
+import subprocess
 import sys
 import tempfile
 
@@ -302,6 +307,7 @@ def ext_kind(path):
 
 
 RASTERIZE_LONG_EDGE = 1024
+SVG_SOURCE_LIMIT = 20_000
 
 
 def rasterize_window(raw):
@@ -335,10 +341,29 @@ def rasterize_svg(svg_path):
     )
     with open(html_path, "w", encoding="utf-8") as f:
         f.write(html_text)
-    if preview.render(html_path, png_path, width, height):
+    if preview.render(html_path, png_path, width, height) or _convert_svg(svg_path, png_path, width, height):
         with open(png_path, "rb") as f:
             return f.read()
     return None
+
+
+def _convert_svg(svg_path, png_path, width, height):
+    """Rasterise with rsvg-convert, else macOS's sips, when no headless
+    browser did. True on a PNG actually written."""
+    commands = [
+        ["rsvg-convert", "-w", str(width), "-h", str(height), "-o", png_path, svg_path],
+        ["sips", "-s", "format", "png", "-z", str(height), str(width), svg_path, "--out", png_path],
+    ]
+    for cmd in commands:
+        if not shutil.which(cmd[0]):
+            continue
+        try:
+            subprocess.run(cmd, capture_output=True, timeout=60, check=True)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if os.path.exists(png_path) and os.path.getsize(png_path) > 0:
+            return True
+    return False
 
 
 def build_content(path, prompt, request=None):
@@ -372,6 +397,11 @@ def image_for_critic(path):
         png_bytes = rasterize_svg(path)
         if png_bytes is not None:
             return png_bytes, "image/png", None
+        if os.path.getsize(path) > SVG_SOURCE_LIMIT:
+            raise ValueError(
+                f"no headless browser, rsvg-convert or sips to rasterise {path}, and its "
+                f"source is over {SVG_SOURCE_LIMIT} bytes, too big for the critic to read "
+                "as markup; install Chrome or librsvg to critique it")
         with open(path, "r", encoding="utf-8", errors="replace") as f:
             return None, None, f.read()
     with open(path, "rb") as f:

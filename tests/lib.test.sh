@@ -78,7 +78,7 @@ py() { # python snippet with lib importable -> stdout in $out, exit in $code
 check_code() { if [ "$2" -eq "$3" ]; then printf 'ok   %s\n' "$1"; else printf 'FAIL %s (exit %s, want %s): %s\n' "$1" "$2" "$3" "$(cat "$work/stderr")"; fail=1; fi; }
 check_eq() { if [ "$2" = "$3" ]; then printf 'ok   %s\n' "$1"; else printf 'FAIL %s (got %s, want %s)\n' "$1" "$2" "$3"; fail=1; fi; }
 last_request() { tail -n 1 "$work/requests.jsonl"; }
-requests_count() { [ -f "$work/requests.jsonl" ] && wc -l < "$work/requests.jsonl" || echo 0; }
+requests_count() { [ -f "$work/requests.jsonl" ] && wc -l < "$work/requests.jsonl" | tr -d " " || echo 0; }
 
 # --- keys -----------------------------------------------------------------
 
@@ -89,7 +89,7 @@ check_eq "missing key is MissingKey" "$(grep -c '^lib.keys.MissingKey: ' "$work/
 
 py 'from lib import keys; print(keys.set("OPENROUTER_API_KEY", "file-key"))'
 check_code "set writes the file" "$code" 0
-check_eq "file mode is 0600" "$(stat -c %a "$work/credentials")" "600"
+check_eq "file mode is 0600" "$(stat -c %a "$work/credentials" 2>/dev/null || stat -f %Lp "$work/credentials")" "600"
 check_eq "file holds NAME=value" "$(cat "$work/credentials")" "OPENROUTER_API_KEY=file-key"
 
 py 'from lib import keys; print(keys.get("OPENROUTER_API_KEY"))'
@@ -106,7 +106,7 @@ check_eq "plain env beats its EVAL_ fallback" "$out" "plain-key"
 
 py 'from lib import keys; keys.set("OTHER", "x"); keys.set("OPENROUTER_API_KEY", "new-key")'
 check_eq "set replaces its line and keeps the rest" "$(sort "$work/credentials" | tr '\n' ' ')" "OPENROUTER_API_KEY=new-key OTHER=x "
-check_eq "set keeps mode 0600" "$(stat -c %a "$work/credentials")" "600"
+check_eq "set keeps mode 0600" "$(stat -c %a "$work/credentials" 2>/dev/null || stat -f %Lp "$work/credentials")" "600"
 
 py 'from lib import keys; print(keys.find("NOPE"))'
 check_eq "find returns None for an absent key" "$out" "None"
