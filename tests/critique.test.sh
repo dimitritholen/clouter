@@ -166,6 +166,7 @@ for _ in $(seq 50); do [ -s "$work/port" ] && break; sleep 0.1; done
 [ -s "$work/port" ] || { printf 'FAIL stand-in server did not start\n'; exit 1; }
 export OPENROUTER_BASE_URL="http://127.0.0.1:$(cat "$work/port")"
 export CLOUTER_CREDENTIALS="$work/no-such-file"
+export CLOUTER_LEARNED="$work/learned.json"
 export OPENROUTER_API_KEY="test-key"
 mkdir -p "$work/cwd" && cd "$work/cwd"
 

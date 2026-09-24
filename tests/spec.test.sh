@@ -11,6 +11,7 @@ FIXTURES="$ROOT/tests/fixtures/llms"
 fail=0
 work="$(mktemp -d)"
 trap 'rm -rf "$work"; [ -n "${server_pid:-}" ] && kill "$server_pid" 2>/dev/null' EXIT
+export CLOUTER_LEARNED="$work/learned.json"
 
 check_code() { if [ "$2" -eq "$3" ]; then printf 'ok   %s\n' "$1"; else printf 'FAIL %s (exit %s, want %s): %s\n' "$1" "$2" "$3" "$(cat "$work/stderr" 2>/dev/null)"; fail=1; fi; }
 check_eq() { if [ "$2" = "$3" ]; then printf 'ok   %s\n' "$1"; else printf 'FAIL %s (got %s, want %s)\n' "$1" "$2" "$3"; fail=1; fi; }
@@ -105,6 +106,17 @@ run google/veo-3.1
 check_code "CLI: veo-3.1 via stand-in server" "$code" 0
 check_eq "CLI: prints the parsed spec" "$(printf '%s' "$out" | jq -r '.endpoints[0].path')" "/api/v1/videos"
 check_eq "CLI: source is the fetched URL" "$(printf '%s' "$out" | jq -r '.source')" "$OPENROUTER_BASE_URL/google/veo-3.1/llms.txt"
+
+# learned.py overlay: a value the provider rejected leaves the enum and
+# is listed under "rejected"; parse() above stays untouched by it.
+now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+printf '{"google/veo-3.1": {"prefer": {}, "rejected": {"duration": {"8": "%s"}}}}\n' "$now" > "$CLOUTER_LEARNED"
+run google/veo-3.1
+check_code "CLI, learned: veo-3.1 via stand-in server" "$code" 0
+check_eq "CLI, learned: rejected duration dropped from enum" "$(printf '%s' "$out" | jq -c '.endpoints[0].fields.duration.enum')" '[4,6]'
+check_eq "CLI, learned: rejected duration listed under rejected" "$(printf '%s' "$out" | jq -c '.endpoints[0].fields.duration.rejected')" '[8]'
+check_eq "CLI, learned: untouched field has no rejected key" "$(printf '%s' "$out" | jq -c '.endpoints[0].fields.aspect_ratio | has("rejected")')" 'false'
+rm -f "$CLOUTER_LEARNED"
 
 run no/such-model
 check_code "CLI: 404 exits 1" "$code" 1

@@ -49,7 +49,9 @@ that choice.
    generate.py owns those. If generate.py refuses a `--param` value (exit 2,
    listing the allowed values on stderr), pick again from that list rather
    than retrying blindly. If spec.py fails, carry on without it — the
-   generic request still goes out.
+   generic request still goes out. spec.py's output already leaves out
+   values the provider rejected before (listed under `"rejected"`), so an
+   enum it prints is the real set of options.
 
 4. **You generate.** On a model choice, first turn the request into a design
    brief: subject, hierarchy, style, colours, background, what to leave out.
@@ -212,6 +214,9 @@ summary.
   polling a speech generation's cost lookup (unset: 1, 2, 4, 8, 8s).
 - `CLOUTER_VISUAL_LOG` — cost log path override (default
   `visual.jsonl` next to the credentials file).
+- `CLOUTER_LEARNED` — path of the store of values a provider rejected
+  and what worked instead (default `learned.json` next to the
+  credentials file, 30 days).
 
 Rules: never call generate.py before the user chose; never print or echo a
 key; a hook or API failure means silence and the normal reply, not an

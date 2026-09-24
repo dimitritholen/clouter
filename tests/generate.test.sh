@@ -229,6 +229,8 @@ for _ in $(seq 50); do [ -s "$work/port" ] && break; sleep 0.1; done
 [ -s "$work/port" ] || { printf 'FAIL stand-in server did not start\n'; exit 1; }
 export OPENROUTER_BASE_URL="http://127.0.0.1:$(cat "$work/port")"
 export CLOUTER_CREDENTIALS="$work/no-such-file"
+# learned.py's store: never the real ~/.config/clouter/learned.json.
+export CLOUTER_LEARNED="$work/learned.json"
 export OPENROUTER_API_KEY="test-key"
 export CLOUTER_POLL_SECONDS=0
 # Every existing case below predates the mandatory critique pass and asserts
@@ -316,6 +318,18 @@ check_eq "pcm-only: wav header parses back to rate/channels/width" \
   "$(python3 -c 'import wave; w = wave.open("assets/gemini-only-speaks-pcm.wav"); print(w.getframerate(), w.getnchannels(), w.getsampwidth())')" \
   "24000 1 2"
 check_eq "pcm-only: exactly two speech requests (mp3 then pcm)" "$(jq -r 'select(.path=="/api/v1/audio/speech") | .body.response_format' "$work/requests.jsonl" | tr '\n' ',')" "mp3,pcm,"
+check_eq "pcm-only: learned.json records mp3 rejected and pcm preferred" \
+  "$(jq -c '."acme/tts-pcmonly" | [.prefer.response_format.value, (.rejected.response_format | keys)]' "$CLOUTER_LEARNED")" '["pcm",["\"mp3\""]]'
+
+run --model acme/tts-pcmonly --modality speech --prompt "Gemini learned pcm"
+check_code "pcm-only, learned: written" "$code" 0
+check_eq "pcm-only, learned: exactly one speech request, straight to pcm" "$(jq -r 'select(.path=="/api/v1/audio/speech") | .body.response_format' "$work/requests.jsonl" | tr '\n' ',')" "pcm,"
+check_eq "pcm-only, learned: still a wav" "$(field .media_type)" "audio/wav"
+
+run --model acme/tts-pcmonly --modality speech --prompt "Ask for mp3 anyway" --param response_format=mp3
+check_code "pcm-only, learned: --param response_format=mp3 refused, usage exit" "$code" 2
+check_eq "pcm-only, learned: refusal says the provider rejected it and names pcm" "$(grep -c 'response_format mp3 was rejected by the provider on .*; use one of: pcm' "$work/stderr")" "1"
+check_eq "pcm-only, learned: refused mp3 sends no request at all" "$([ -f "$work/requests.jsonl" ] && wc -l < "$work/requests.jsonl" || echo 0)" "0"
 
 run --model acme/tts --modality speech --prompt "Explicit pcm" --param response_format=pcm
 check_code "--param response_format=pcm: written" "$code" 0
@@ -354,6 +368,11 @@ check_code "images-only, auto: written via images endpoint" "$code" 0
 check_eq "images-only, auto: file is the decoded PNG" "$(head -c 8 assets/a-blue-heron-ink.png | od -An -c | tr -d ' \n')" '211PNG\r\n032\n'
 check_eq "images-only, auto: cost 0.0042" "$(field .cost)" "0.0042"
 check_eq "images-only, auto: chat/completions then images" "$(jq -r '.path' "$work/requests.jsonl" | tr '\n' ';')" "/api/v1/chat/completions;/api/v1/images;"
+check_eq "images-only, auto: learned.json prefers the images endpoint" "$(jq -r '."acme/images-only".prefer.endpoint.value' "$CLOUTER_LEARNED")" "images"
+
+run --model acme/images-only --modality raster_image --prompt "A grey heron, learned"
+check_code "images-only, auto, learned: written" "$code" 0
+check_eq "images-only, auto, learned: one request, straight to images" "$(jq -r '.path' "$work/requests.jsonl" | tr '\n' ';')" "/api/v1/images;"
 
 run --model acme/images-only --modality raster_image --prompt "Colorful parrot" --endpoint images
 check_code "--endpoint images: written" "$code" 0

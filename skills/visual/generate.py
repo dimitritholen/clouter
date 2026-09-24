@@ -88,6 +88,14 @@ CLOUTER_POLL_SECONDS sets the poll interval (5). CLOUTER_COST_WAIT_SECONDS
 caps each step of the backoff (1, 2, 4, 8, 8s) while polling a speech
 generation's cost, mainly for tests.
 
+What the two built-in fallbacks prove live is remembered by learned.py
+(CLOUTER_LEARNED, else learned.json next to the credentials, 30 days):
+a speech model that 400'd on mp3 and answered pcm gets pcm first next
+time, and mp3 is refused (exit 2, before any request) as "rejected by
+the provider"; an image model whose chat/completions 404'd and whose
+/api/v1/images answered goes straight to /api/v1/images on --endpoint
+auto. Nothing is ever learned from arbitrary error text.
+
 Every successful generation appends one JSON line to a cost log:
 {"ts", "model", "modality", "path" (absolute), "cost"}. The log path is
 CLOUTER_VISUAL_LOG, else visual.jsonl next to the credentials file
@@ -124,6 +132,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
 sys.path.insert(0, HERE)
 from lib import keys, png  # noqa: E402
 import catalogue  # noqa: E402
+import learned  # noqa: E402
 import preview  # noqa: E402
 import spec  # noqa: E402
 
@@ -356,11 +365,31 @@ def coerce_param(raw, field_type):
     return raw  # string, or a typeless passthrough field (chat/completions' extras)
 
 
-def validate_value(name, value, field):
+def rejected_error(name, value, rejected, enum, preferred=None):
+    """The error for a value learned.py saw the provider reject, or None.
+    rejected is learned.rejected(model, name); enum the spec's, or None
+    when there is no spec, in which case the learned preferred value (if
+    any) is the one suggested."""
+    if not isinstance(value, (str, int, float, bool)) or value not in rejected:
+        return None
+    message = f"{name} {value} was rejected by the provider on {str(rejected[value])[:10]}"
+    if enum is None:
+        enum = [preferred] if preferred is not None else []
+    allowed = [v for v in enum if v not in rejected]
+    if allowed:
+        message += "; use one of: " + ", ".join(str(v) for v in allowed)
+    return message
+
+
+def validate_value(name, value, field, rejected=None):
     """enum/min/max errors for one already-coerced field value, as
-    stderr-ready strings naming the allowed values."""
+    stderr-ready strings naming the allowed values. A value in rejected
+    (learned.rejected for this field) is refused like an out-of-enum one."""
     errors = []
-    if field["enum"] is not None and value not in field["enum"]:
+    refused = rejected_error(name, value, rejected or {}, field["enum"])
+    if refused:
+        errors.append(refused)
+    elif field["enum"] is not None and value not in field["enum"]:
         allowed = ", ".join(str(v) for v in field["enum"])
         errors.append(f"{name} must be one of: {allowed} (got {value!r})")
     if isinstance(value, (int, float)) and not isinstance(value, bool):
@@ -379,7 +408,7 @@ PARAM_OWNED_BY_FLAG = {
 }
 
 
-def build_params(param_args, fields, derived, always_supplied):
+def build_params(param_args, fields, derived, always_supplied, model=None):
     """--param key=value entries (repeatable) plus the values generate.py
     itself derives from --aspect/--duration/--voice/--transparent, checked
     against fields (the spec endpoint's field dict, or None when the spec
@@ -387,7 +416,12 @@ def build_params(param_args, fields, derived, always_supplied):
     missing spec never blocks a generation). Returns (extra, errors):
     extra is the --param fields, coerced and ready to merge top-level into
     the request body; errors is one line per bad or missing field, and a
-    non-empty errors means extra must not be sent."""
+    non-empty errors means extra must not be sent. With model set, a
+    value learned.py saw the provider reject for that model is refused
+    too, spec or no spec: the rejection was proven live."""
+    def gone(name):
+        return learned.rejected(model, name) if model else {}
+
     errors = []
     extra = {}
     for item in param_args:
@@ -411,19 +445,26 @@ def build_params(param_args, fields, derived, always_supplied):
             except (ValueError, json.JSONDecodeError) as e:
                 errors.append(f"--param {key}: cannot read {raw!r} as {field['type']}: {e}")
                 continue
-            errors.extend(validate_value(key, value, field))
+            errors.extend(validate_value(key, value, field, gone(key)))
         else:
             try:
                 value = json.loads(raw)
             except (ValueError, json.JSONDecodeError):
                 value = raw
+            refused = rejected_error(key, value, gone(key), None, learned.preferred(model, key) if model else None)
+            if refused:
+                errors.append(refused)
         extra[key] = value
 
+    for name, value in derived.items():
+        field = fields.get(name) if fields is not None else None
+        if field is not None:
+            errors.extend(validate_value(name, value, field, gone(name)))
+        else:
+            refused = rejected_error(name, value, gone(name), None, learned.preferred(model, name) if model else None)
+            if refused:
+                errors.append(refused)
     if fields is not None:
-        for name, value in derived.items():
-            field = fields.get(name)
-            if field is not None:
-                errors.extend(validate_value(name, value, field))
         supplied = set(extra) | set(derived) | always_supplied
         for name, field in fields.items():
             if field["required"] and name not in supplied:
@@ -446,7 +487,10 @@ def make_image(model, prompt, aspect, key, endpoint, transparent=False, referenc
         # auto falls back once: some models only exist behind /api/v1/images
         # and chat/completions says so in a 404.
         if endpoint == "auto" and e.status == 404 and "/api/v1/images" in str(e):
-            return make_image_via_images(model, prompt, aspect, key, reference=reference, params=params)
+            result = make_image_via_images(model, prompt, aspect, key, reference=reference, params=params)
+            # proven live: the next --endpoint auto goes straight to images.
+            learned.record_prefer(model, "endpoint", "images")
+            return result
         raise
 
 
@@ -629,7 +673,9 @@ def _wrap_pcm_wav(raw, content_type):
 
 def make_speech(model, prompt, voice, key, params=None):
     user_response_format = (params or {}).get("response_format")
-    body = {"model": model, "input": prompt, "response_format": user_response_format or "mp3"}
+    # a format this model was already proven to need skips the failing mp3 call.
+    first_format = user_response_format or learned.preferred(model, "response_format") or "mp3"
+    body = {"model": model, "input": prompt, "response_format": first_format}
     if params:
         body.update(params)
     voice = voice or default_voice(model, key)
@@ -639,10 +685,13 @@ def make_speech(model, prompt, voice, key, params=None):
         headers, raw = request("POST", "/api/v1/audio/speech", key, body, accept="*/*")
     except ApiError as e:
         message = str(e).lower()
-        if (not user_response_format and e.status == 400
+        if (not user_response_format and first_format != "pcm" and e.status == 400
                 and "response_format" in message and "pcm" in message):
             body["response_format"] = "pcm"
             headers, raw = request("POST", "/api/v1/audio/speech", key, body, accept="*/*")
+            # proven live: first_format 400'd, pcm answered.
+            learned.record_reject(model, "response_format", first_format)
+            learned.record_prefer(model, "response_format", "pcm")
         else:
             raise
     if not raw:
@@ -920,11 +969,14 @@ def main(argv):
     effective_endpoint = args.endpoint
     if (args.modality in ("raster_image", "vector_svg") and not args.transparent
             and args.endpoint == "auto"
-            and endpoint_fields(spec_result, "/api/v1/chat/completions") is None
-            and endpoint_fields(spec_result, "/api/v1/images") is not None):
-        # This model's spec only has an /api/v1/images section: auto's
-        # chat/completions try would just spend a call on a guaranteed 404.
-        # Target images directly, and validate against its section.
+            and ((endpoint_fields(spec_result, "/api/v1/chat/completions") is None
+                  and endpoint_fields(spec_result, "/api/v1/images") is not None)
+                 or learned.preferred(args.model, "endpoint") == "images")):
+        # This model's spec only has an /api/v1/images section, or an
+        # earlier auto run saw chat/completions 404 and images answer
+        # (learned.py): auto's chat/completions try would just spend a
+        # call on a guaranteed 404. Target images directly, and validate
+        # against its section.
         endpoint_path = "/api/v1/images"
         effective_endpoint = "images"
     fields = endpoint_fields(spec_result, endpoint_path)
@@ -940,7 +992,8 @@ def main(argv):
         derived["background"] = "transparent"
         derived["output_format"] = "png"
 
-    params, param_errors = build_params(args.params, fields, derived, ALWAYS_SUPPLIED.get(endpoint_path, set()))
+    params, param_errors = build_params(args.params, fields, derived, ALWAYS_SUPPLIED.get(endpoint_path, set()),
+                                        model=args.model)
     if param_errors:
         for message in param_errors:
             print(f"generate: {message}", file=sys.stderr)

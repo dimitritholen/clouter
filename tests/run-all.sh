@@ -5,6 +5,12 @@ set -u
 REPO_ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd -P)"
 cd "$REPO_ROOT"
 
+# learned.py's store for any test that forgets its own CLOUTER_LEARNED:
+# the suite must never write the real ~/.config/clouter/learned.json.
+learned_dir="$(mktemp -d)"
+trap 'rm -rf "$learned_dir"' EXIT
+export CLOUTER_LEARNED="$learned_dir/learned.json"
+
 # Collect totals
 total_ok=0
 total_fail=0

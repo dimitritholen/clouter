@@ -13,7 +13,9 @@ does and how to install it.
 - `skills/visual/` — the `visual` skill: `SKILL.md`, `route.py` (the hook),
   `catalogue.py` (live OpenRouter model list), `ranking.py` (Jev calls),
   `spec.py` (fetches and parses a model's request spec from its
-  `llms.txt`), `generate.py` (writes the file, logs cost), `critique.py`
+  `llms.txt`), `learned.py` (remembers per model what the provider
+  rejected and what worked, `learned.json`), `generate.py` (writes the
+  file, logs cost), `critique.py`
   (vision-model critic and fix rounds), `preview.py` (light/dark contact
   sheet), `setup-key.py` (one-time OAuth key setup).
 - `lib/` — shared helpers: `jev.py` (HTTP client for Jev/TypeSafe),

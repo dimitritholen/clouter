@@ -37,6 +37,12 @@ period; a `;` before a nested aside such as frame_images' frame_type
 enum is the natural cut, so that's what's kept short). default is only
 set when the description says "defaults to X"; every other field key is
 always present, null where it doesn't apply. Stdlib only.
+
+load() (not parse(), which stays a pure text -> dict function) overlays
+what learned.py remembers the provider rejected for this model: those
+values are dropped from the field's "enum" and listed under "rejected",
+so a wrong llms.txt enum shows the real options. A field with nothing
+rejected has no "rejected" key.
 OPENROUTER_BASE_URL redirects both the model-scoped llms.txt host and,
 for tests, points at a stand-in server.
 """
@@ -50,6 +56,8 @@ import urllib.request
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import learned  # noqa: E402
 
 REQUEST_FIELDS_RE = re.compile(r"### Request fields[^\n]*\n\n((?:- .+\n?)+)")
 ENDPOINT_RE = re.compile(r"^(GET|POST|PUT|PATCH|DELETE) (https://\S+)$", re.MULTILINE)
@@ -193,12 +201,27 @@ def parse(text, model_id):
     return {"model": model_id, "source": None, "endpoints": endpoints}
 
 
+def apply_learned(result):
+    """Drop learned-rejected values from each field's enum and list them
+    under "rejected". Mutates and returns result."""
+    for endpoint in result["endpoints"]:
+        for name, field in endpoint["fields"].items():
+            gone = learned.rejected(result["model"], name)
+            if not gone:
+                continue
+            if field["enum"] is not None:
+                field["enum"] = [v for v in field["enum"] if v not in gone]
+            field["rejected"] = list(gone)
+    return result
+
+
 def load(model_id, timeout=10.0):
-    """fetch(model_id) then parse(...). Raises SpecError or ValueError."""
+    """fetch(model_id), parse(...), then apply_learned(...). Raises
+    SpecError or ValueError."""
     text, url = fetch(model_id, timeout)
     result = parse(text, model_id)
     result["source"] = url
-    return result
+    return apply_learned(result)
 
 
 def main(argv):

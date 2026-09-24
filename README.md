@@ -22,7 +22,12 @@ model's own fields (resolution, seed, generate_audio, ...) rather than a
 generic guess; those go through generate.py's repeatable `--param
 key=value`, validated against the model's spec before anything is sent. A
 raster or vector generation is also judged by a vision-model critic and, if
-it finds defects, fixed for a few rounds before that report.
+it finds defects, fixed for a few rounds before that report. When a model's
+`llms.txt` turns out wrong and generate.py's own fallback proves it (a speech
+model that rejects mp3 but takes pcm, an image model that only answers on
+`/api/v1/images`), that is remembered in `learned.json` for 30 days, so the
+next request goes right the first time and spec.py no longer offers the
+rejected value.
 
 ## Install
 
@@ -74,6 +79,7 @@ machine, the same run serves a paste page whose URL is printed on stderr;
 | `CLOUTER_CRITIQUE` | `1` | Set to `0`, `off` or `false` to skip the post-generation critique pass (same as `--no-critique`). Video and speech are never critiqued. |
 | `CLOUTER_CRITIC` | built-in default model | Overrides the vision model used for critique; `--critic` on the command line wins over it. |
 | `CLOUTER_CREDENTIALS` | `~/.config/clouter/credentials` | Overrides the credentials file path, mainly for tests. |
+| `CLOUTER_LEARNED` | `learned.json` next to the credentials file | Full path of the store of what providers rejected and what worked per model (entries expire after 30 days). Mainly for tests. |
 
 ## Running tests
 
