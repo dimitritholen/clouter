@@ -1,0 +1,14 @@
+{
+  "name": "clouter",
+  "description": "Visual routing plugin for Claude Code that routes image, SVG, video and speech prompts to Jev-ranked OpenRouter models.",
+  "owner": {
+    "name": "dimitritholen"
+  },
+  "plugins": [
+    {
+      "name": "clouter",
+      "source": "./",
+      "description": "routes image, SVG, video and speech prompts to Jev-ranked OpenRouter models"
+    }
+  ]
+}

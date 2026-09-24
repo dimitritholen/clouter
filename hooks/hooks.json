@@ -1,0 +1,16 @@
+{
+  "description": "clouter: route visual prompts (image, SVG, video, speech) to Jev-ranked OpenRouter models",
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/skills/visual/route.py\"",
+            "timeout": 10
+          }
+        ]
+      }
+    ]
+  }
+}

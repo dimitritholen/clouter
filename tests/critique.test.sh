@@ -1,0 +1,450 @@
+#!/usr/bin/env bash
+# Tests for skills/visual/critique.py against a stand-in OpenRouter that
+# plays both the critic (chat/completions with a system message) and the
+# generator (chat/completions with modalities:["image"]) sides, plus a
+# fake google-chrome for the SVG-rasterisation path. No key, no network.
+set -u
+
+ROOT="$(CDPATH= cd -- "$(dirname "$0")/.." && pwd -P)"
+SCRIPT="$ROOT/skills/visual/critique.py"
+fail=0
+work="$(mktemp -d)"
+trap 'rm -rf "$work"; [ -n "${server_pid:-}" ] && kill "$server_pid" 2>/dev/null' EXIT
+
+python3 - "$work" <<'EOF_SERVER' &
+import base64, json, sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+work = sys.argv[1]
+PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
+
+calls = {}
+
+
+def bump(model):
+    calls[model] = calls.get(model, 0) + 1
+    return calls[model]
+
+
+def critic_answer(model):
+    """(pass, defects) for one critic call, by model id and call count."""
+    n = bump(model)
+    if model == "acme/critic-pass":
+        return True, []
+    if model == "acme/critic-fail-simple":
+        return False, [{"type": "artifact", "where": "a smudge", "box": None, "severity": 5, "fix": "remove the smudge"}]
+    if model in ("acme/critic-then-pass", "acme/critic-noref-then-pass"):
+        if n == 1:
+            return False, [{"type": "artifact", "where": "top edge", "box": None, "severity": 5, "fix": "remove the artifact"}]
+        return True, []
+    if model == "acme/critic-worsening":
+        if n == 1:
+            return False, [{"type": "other", "where": "a", "box": None, "severity": 3, "fix": "fix a"}]
+        if n == 2:
+            return False, [{"type": "other", "where": "b", "box": None, "severity": 5, "fix": "fix b"},
+                            {"type": "other", "where": "c", "box": None, "severity": 5, "fix": "fix c"}]
+        return False, [{"type": "other", "where": "d", "box": None, "severity": 4, "fix": "fix d"},
+                        {"type": "other", "where": "e", "box": None, "severity": 2, "fix": "fix e"}]
+    raise ValueError(f"stand-in: no script for critic model {model}")
+
+
+class Handler(BaseHTTPRequestHandler):
+    def log_message(self, *args): pass
+
+    def send_json(self, status, obj):
+        raw = json.dumps(obj).encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(raw)))
+        self.end_headers()
+        self.wfile.write(raw)
+
+    def record(self, body=None):
+        with open(f"{work}/requests.jsonl", "a") as f:
+            f.write(json.dumps({"method": self.command, "path": self.path,
+                                "auth": self.headers.get("Authorization"), "body": body}) + "\n")
+
+    def do_GET(self):
+        self.record()
+        if self.path == "/api/v1/models?output_modalities=image":
+            # Escalation fixture: acme/gen is the "current" generator (price
+            # .00003); acme/gen-cheap is cheaper (excluded by the price
+            # floor), acme/gen-best/-better/-extra are pricier candidates
+            # that take a reference image, acme/gen-noimage-hi is pricier
+            # but takes no image input (excluded).
+            self.send_json(200, {"data": [
+                {"id": "acme/gen", "name": "Acme Gen", "description": "Current generator.",
+                 "architecture": {"input_modalities": ["text", "image"]}, "pricing": {"image_output": "0.00003"}},
+                {"id": "acme/gen-noref", "architecture": {"input_modalities": ["text"]}},
+                {"id": "acme/gen-cheap", "name": "Acme Cheap", "description": "Cheaper, excluded by price.",
+                 "architecture": {"input_modalities": ["text", "image"]}, "pricing": {"image_output": "0.00001"}},
+                {"id": "acme/gen-best", "name": "Acme Best", "description": "Jev's recommended pick.",
+                 "architecture": {"input_modalities": ["text", "image"]}, "pricing": {"image_output": "0.00004"}},
+                {"id": "acme/gen-better", "name": "Acme Better", "description": "Another candidate.",
+                 "architecture": {"input_modalities": ["text", "image"]}, "pricing": {"image_output": "0.00005"}},
+                {"id": "acme/gen-extra", "name": "Acme Extra", "description": "Yet another candidate.",
+                 "architecture": {"input_modalities": ["text", "image"]}, "pricing": {"image_output": "0.00006"}},
+                {"id": "acme/gen-noimage-hi", "name": "Acme No Image", "description": "No reference support, excluded.",
+                 "architecture": {"input_modalities": ["text"]}, "pricing": {"image_output": "0.00009"}},
+                {"id": "acme/gen-sort", "name": "Acme Sort", "description": "Current generator for the sort-order test.",
+                 "architecture": {"input_modalities": ["text", "image"]}, "pricing": {"image_output": "0.0000001"}},
+                {"id": "acme/gen-sort-a", "name": "Acme Sort A", "description": "Cheapest sort candidate.",
+                 "architecture": {"input_modalities": ["text", "image"]}, "pricing": {"image_output": "0.000005"}},
+                {"id": "acme/gen-sort-b", "name": "Acme Sort B", "description": "Second-cheapest sort candidate, highest probability.",
+                 "architecture": {"input_modalities": ["text", "image"]}, "pricing": {"image_output": "0.000006"}},
+                {"id": "acme/gen-sort-c", "name": "Acme Sort C", "description": "Middle-priced sort candidate, zero probability.",
+                 "architecture": {"input_modalities": ["text", "image"]}, "pricing": {"image_output": "0.000007"}},
+                {"id": "acme/gen-sort-d", "name": "Acme Sort D", "description": "Second-highest priced sort candidate, second-highest probability.",
+                 "architecture": {"input_modalities": ["text", "image"]}, "pricing": {"image_output": "0.000008"}},
+                {"id": "acme/gen-sort-e", "name": "Acme Sort E", "description": "Priciest sort candidate, zero probability.",
+                 "architecture": {"input_modalities": ["text", "image"]}, "pricing": {"image_output": "0.000009"}},
+            ]}); return
+        self.send_json(404, {"error": {"message": "no such path"}})
+
+    def do_POST(self):
+        body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        self.record(body)
+        model = body.get("model", "")
+        messages = body.get("messages") or []
+        is_critic = bool(messages) and messages[0].get("role") == "system"
+
+        if self.path == "/api/alpha/decisions":
+            state = body.get("state") or {}
+            if state.get("current_model") == "acme/gen-jevboom":
+                self.send_json(500, {"error": {"message": "stand-in exploded"}}); return
+            criteria = body["questions"]["model"]["criteria"]
+            ids = list(criteria)
+            # Non-monotonic probabilities over price-ordered candidates, to prove
+            # build_escalation sorts by probability rather than trusting the
+            # cheapest-first order rank_models hands back.
+            sort_probs = {"acme/gen-sort-a": 0.01, "acme/gen-sort-b": 0.66,
+                          "acme/gen-sort-c": 0.0, "acme/gen-sort-d": 0.33, "acme/gen-sort-e": 0.0}
+            if set(ids) & set(sort_probs):
+                pick = "acme/gen-sort-b"
+                conf = sort_probs[pick]
+                probs = {i: sort_probs.get(i, 0.0) for i in ids}
+                self.send_json(200, {"model": "jev-stand-in", "id": "req-jev", "answers": {
+                    "model": {"type": "choice", "choice": pick, "confidence": conf, "probabilities": probs}}})
+                return
+            pick = next((i for i in ids if "best" in i), ids[0])
+            conf = 0.7
+            probs = {i: round((1 - conf) / max(1, len(ids) - 1), 3) for i in ids}
+            probs[pick] = conf
+            self.send_json(200, {"model": "jev-stand-in", "id": "req-jev", "answers": {
+                "model": {"type": "choice", "choice": pick, "confidence": conf, "probabilities": probs}}})
+            return
+
+        if self.path != "/api/v1/chat/completions":
+            self.send_json(404, {"error": {"message": "no such path"}}); return
+
+        if is_critic:
+            if model.startswith("acme/critic-badjson"):
+                n = bump(model)
+                if model == "acme/critic-badjson-always" or n == 1:
+                    self.send_json(200, {"choices": [{"message": {"role": "assistant", "content": "sorry, I cannot help with that"}}],
+                                         "usage": {"cost": 0.001}}); return
+                content = json.dumps({"pass": True, "defects": []})
+                self.send_json(200, {"choices": [{"message": {"role": "assistant", "content": content}}],
+                                     "usage": {"cost": 0.001}}); return
+            passed, defects = critic_answer(model)
+            content = json.dumps({"pass": passed, "defects": defects})
+            self.send_json(200, {"choices": [{"message": {"role": "assistant", "content": content}}],
+                                 "usage": {"cost": 0.002}}); return
+
+        # generator side: fix-round image call
+        url = "data:image/png;base64," + base64.b64encode(PNG).decode()
+        self.send_json(200, {"choices": [{"message": {"role": "assistant", "content": "",
+                             "images": [{"type": "image_url", "image_url": {"url": url}}]}}],
+                             "usage": {"cost": 0.01}}); return
+
+
+server = HTTPServer(("127.0.0.1", 0), Handler)
+open(f"{work}/port", "w").write(str(server.server_port))
+server.serve_forever()
+EOF_SERVER
+server_pid=$!
+for _ in $(seq 50); do [ -s "$work/port" ] && break; sleep 0.1; done
+[ -s "$work/port" ] || { printf 'FAIL stand-in server did not start\n'; exit 1; }
+export OPENROUTER_BASE_URL="http://127.0.0.1:$(cat "$work/port")"
+export CLOUTER_CREDENTIALS="$work/no-such-file"
+export OPENROUTER_API_KEY="test-key"
+mkdir -p "$work/cwd" && cd "$work/cwd"
+
+check_code() { if [ "$2" -eq "$3" ]; then printf 'ok   %s\n' "$1"; else printf 'FAIL %s (exit %s, want %s): %s\n' "$1" "$2" "$3" "$(cat "$work/stderr")"; fail=1; fi; }
+check_eq() { if [ "$2" = "$3" ]; then printf 'ok   %s\n' "$1"; else printf 'FAIL %s (got %s, want %s)\n' "$1" "$2" "$3"; fail=1; fi; }
+run() { rm -f "$work/requests.jsonl"; out=$("$SCRIPT" "$@" 2>"$work/stderr"); code=$?; }
+field() { printf '%s' "$out" | jq -r "$1"; }
+
+TINY_PNG_B64="iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+printf '%s' "$TINY_PNG_B64" | base64 -d > original.png
+
+# --- pass on the first judge ---------------------------------------------------
+run original.png --prompt "A red fox" --model acme/gen --critic acme/critic-pass
+check_code "pass first try: exit 0" "$code" 0
+check_eq "pass first try: no rounds used" "$(field .rounds)" "0"
+check_eq "pass first try: final is the original" "$(field .final)" "original.png"
+check_eq "pass first try: pass true" "$(field .pass)" "true"
+check_eq "pass first try: files has only the original" "$(field '.files | length')" "1"
+check_eq "pass first try: critic id echoed" "$(field .critic)" "acme/critic-pass"
+check_eq "pass first try: no generator request" "$(jq -c 'select(.body.model=="acme/gen")' "$work/requests.jsonl" | wc -l | tr -d ' ')" "0"
+critic_body="$(jq -c 'select(.body.model=="acme/critic-pass")' "$work/requests.jsonl")"
+check_eq "pass first try: critic request has temperature 0" "$(printf '%s' "$critic_body" | jq '.body.temperature')" "0"
+
+# --- fail, then fix, then pass; reference sent on the fix round ----------------
+run original.png --prompt "A red fox" --model acme/gen --critic acme/critic-then-pass
+check_code "fail then fix then pass: exit 0" "$code" 0
+check_eq "fail then fix then pass: pass true" "$(field .pass)" "true"
+check_eq "fail then fix then pass: one round used" "$(field .rounds)" "1"
+check_eq "fail then fix then pass: final is the .r1 file" "$(field .final)" "original.r1.png"
+check_eq "fail then fix then pass: files lists original then .r1" "$(field '.files | join(",")')" "original.png,original.r1.png"
+[ -s original.r1.png ] && printf 'ok   fail then fix then pass: .r1 file written\n' || { printf 'FAIL .r1 file missing\n'; fail=1; }
+fix_body="$(jq -c 'select(.body.model=="acme/gen")' "$work/requests.jsonl")"
+check_eq "fix round: prompt carries the fix instruction" "$(printf '%s' "$fix_body" | jq -r '.body.messages[0].content[0].text' | grep -c 'remove the artifact')" "1"
+ref_url="$(printf '%s' "$fix_body" | jq -r '.body.messages[0].content[1].image_url.url')"
+check_eq "fix round: reference sent as a second image_url part" "$(printf '%s' "$ref_url" | cut -c1-22)" "data:image/png;base64,"
+check_eq "fix round: reference decodes to the original's bytes" \
+  "$(printf '%s' "$ref_url" | sed 's/^data:image\/png;base64,//' | base64 -d | cmp -s - original.png && echo same || echo different)" "same"
+check_eq "fix round: generator request has no temperature key" "$(printf '%s' "$fix_body" | jq 'has("body") and (.body | has("temperature"))')" "false"
+
+# --- still failing after N rounds: lowest score wins, not the last ------------
+run original.png --prompt "A blue jay" --model acme/gen --critic acme/critic-worsening --rounds 2
+check_code "still failing after N rounds: exit 0 (not passing isn't an error)" "$code" 0
+check_eq "still failing: pass false" "$(field .pass)" "false"
+check_eq "still failing: both rounds used" "$(field .rounds)" "2"
+check_eq "still failing: final is the original (lowest score 3), not the last (score 6)" "$(field .final)" "original.png"
+check_eq "still failing: three files judged" "$(field '.files | length')" "3"
+
+# --- --rounds 0: judge only -----------------------------------------------------
+run original.png --prompt "A red fox" --model acme/gen --critic acme/critic-fail-simple --rounds 0
+check_code "--rounds 0: exit 0" "$code" 0
+check_eq "--rounds 0: rounds used is 0" "$(field .rounds)" "0"
+check_eq "--rounds 0: final is the original" "$(field .final)" "original.png"
+check_eq "--rounds 0: pass false" "$(field .pass)" "false"
+check_eq "--rounds 0: no generator request" "$(jq -c 'select(.body.model=="acme/gen")' "$work/requests.jsonl" | wc -l | tr -d ' ')" "0"
+
+# --- unparseable critic reply -----------------------------------------------------
+run original.png --prompt "A red fox" --model acme/gen --critic acme/critic-badjson-always
+check_code "unparseable twice: exit 9" "$code" 9
+check_eq "unparseable twice: message on stderr" "$(grep -c 'did not answer with parseable JSON' "$work/stderr")" "1"
+
+run original.png --prompt "A red fox" --model acme/gen --critic acme/critic-badjson-once
+check_code "unparseable once then valid: exit 0" "$code" 0
+check_eq "unparseable once then valid: pass true" "$(field .pass)" "true"
+check_eq "unparseable once then valid: no fix round needed" "$(field .rounds)" "0"
+
+# --- model without image input: no reference sent -------------------------------
+run original.png --prompt "An owl" --model acme/gen-noref --critic acme/critic-noref-then-pass
+check_code "gen model without image input: exit 0" "$code" 0
+check_eq "gen model without image input: still fixed and passed" "$(field .pass)" "true"
+noref_body="$(jq -c 'select(.body.model=="acme/gen-noref")' "$work/requests.jsonl")"
+check_eq "gen model without image input: plain string content, no reference" "$(printf '%s' "$noref_body" | jq -r '.body.messages[0].content | type')" "string"
+
+# --- no key -----------------------------------------------------------------------
+OPENROUTER_API_KEY= run original.png --prompt "A red fox" --model acme/gen --critic acme/critic-pass
+check_code "no key: exit 3" "$code" 3
+check_eq "no key: no request made" "$([ -f "$work/requests.jsonl" ] && wc -l < "$work/requests.jsonl" || echo 0)" "0"
+
+# --- cost log ------------------------------------------------------------------
+log="$work/costs/visual.jsonl"
+export CLOUTER_VISUAL_LOG="$log"
+run original.png --prompt "A red fox" --model acme/gen --critic acme/critic-then-pass
+check_code "cost log: run still succeeds" "$code" 0
+check_eq "cost log: total cost summed and non-null" "$([ "$(field .cost)" != "null" ] && echo yes || echo no)" "yes"
+check_eq "cost log: at least one critique line logged" "$([ "$(grep -c '\"modality\": \"critique\"' "$log")" -ge 1 ] && echo yes || echo no)" "yes"
+unset CLOUTER_VISUAL_LOG
+
+# --- SVG input: rasterised when a browser is available, sent as text otherwise --
+cat > shape.svg <<'EOF'
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32"><rect width="64" height="32"/></svg>
+EOF
+
+mkdir -p "$work/bin-ok"
+cat > "$work/bin-ok/google-chrome" <<EOF
+#!/usr/bin/env bash
+for arg in "\$@"; do
+  case "\$arg" in
+    --screenshot=*) printf '%s' "$TINY_PNG_B64" | base64 -d > "\${arg#--screenshot=}" ;;
+  esac
+done
+exit 0
+EOF
+chmod +x "$work/bin-ok/google-chrome"
+mkdir -p "$work/bin-empty"
+py_dir="$(dirname "$(command -v python3)")"
+
+run_with_path() { rm -f "$work/requests.jsonl"; out=$(PATH="$1" "$SCRIPT" "${@:2}" 2>"$work/stderr"); code=$?; }
+
+run_with_path "$work/bin-ok:$PATH" shape.svg --prompt "A rectangle" --model acme/gen --critic acme/critic-pass
+check_code "svg with chrome: exit 0" "$code" 0
+svg_body="$(jq -c 'select(.body.model=="acme/critic-pass")' "$work/requests.jsonl")"
+svg_content="$(printf '%s' "$svg_body" | jq -r '.body.messages[1].content')"
+check_eq "svg with chrome: content is text+image_url (2 parts)" "$(printf '%s' "$svg_content" | jq 'length')" "2"
+check_eq "svg with chrome: image part is a PNG data url" "$(printf '%s' "$svg_content" | jq -r '.[1].image_url.url' | cut -c1-22)" "data:image/png;base64,"
+
+run_with_path "$work/bin-empty:$py_dir" shape.svg --prompt "A rectangle" --model acme/gen --critic acme/critic-pass
+check_code "svg without chrome: exit 0" "$code" 0
+svg_body2="$(jq -c 'select(.body.model=="acme/critic-pass")' "$work/requests.jsonl")"
+svg_content2="$(printf '%s' "$svg_body2" | jq -r '.body.messages[1].content')"
+check_eq "svg without chrome: content is text only (1 part)" "$(printf '%s' "$svg_content2" | jq 'length')" "1"
+check_eq "svg without chrome: svg markup sent as text" "$(printf '%s' "$svg_content2" | jq -r '.[0].text' | grep -c '<svg')" "1"
+
+# --- SVG rasterisation window: sized from the SVG's own aspect ratio, not a fixed square ---
+cat > wide.svg <<'EOF'
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 400 100"><rect width="400" height="100"/></svg>
+EOF
+
+mkdir -p "$work/bin-record"
+cat > "$work/bin-record/google-chrome" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$@" > "$work/chrome-args"
+for arg in "\$@"; do
+  case "\$arg" in
+    --screenshot=*) printf '%s' "$TINY_PNG_B64" | base64 -d > "\${arg#--screenshot=}" ;;
+  esac
+done
+exit 0
+EOF
+chmod +x "$work/bin-record/google-chrome"
+
+run_with_path "$work/bin-record:$PATH" wide.svg --prompt "A wide banner" --model acme/gen --critic acme/critic-pass
+check_code "wide svg: exit 0" "$code" 0
+window_size="$(grep '^--window-size=' "$work/chrome-args")"
+check_eq "wide svg: window-size argument present" "$([ -n "$window_size" ] && echo yes || echo no)" "yes"
+win_w="$(printf '%s' "$window_size" | sed 's/^--window-size=//' | cut -d, -f1)"
+win_h="$(printf '%s' "$window_size" | sed 's/^--window-size=//' | cut -d, -f2)"
+check_eq "wide svg: window keeps the SVG's 4:1 aspect ratio" "$((win_w * 100 / win_h))" "400"
+
+# --- escalation: fail after rounds offers priced, reference-taking, untried models ---
+run original.png --prompt "A red fox" --model acme/gen --critic acme/critic-fail-simple --rounds 1
+check_code "escalation: exit 0" "$code" 0
+check_eq "escalation: still failing" "$(field .pass)" "false"
+ids="$(field '.escalation.options | map(.id) | join(",")')"
+check_eq "escalation: current model excluded" "$(printf '%s' ",$ids," | grep -c ',acme/gen,')" "0"
+check_eq "escalation: cheaper model excluded" "$(printf '%s' "$ids" | grep -c 'acme/gen-cheap')" "0"
+check_eq "escalation: model without image input excluded" "$(printf '%s' "$ids" | grep -c 'acme/gen-noimage-hi')" "0"
+check_eq "escalation: pricier reference-taking candidates offered" "$ids" "acme/gen-best,acme/gen-better,acme/gen-extra"
+check_eq "escalation: recommended is acme/gen-best" "$(field .escalation.recommended)" "acme/gen-best"
+check_eq "escalation: recommended comes first" "$(field '.escalation.options[0].id')" "acme/gen-best"
+command="$(field .escalation.command)"
+check_eq "escalation: command carries the <MODEL> placeholder" "$(printf '%s' "$command" | grep -c -- '--model <MODEL>')" "1"
+check_eq "escalation: command names --defects-file" "$(printf '%s' "$command" | grep -c -- '--defects-file')" "1"
+check_eq "escalation: command names --tried with the current model" "$(printf '%s' "$command" | grep -c -- '--tried acme/gen')" "1"
+check_eq "escalation: command carries --rounds 1 for a --rounds 1 run" "$(printf '%s' "$command" | grep -c -- '--rounds 1')" "1"
+prompt_file="$(printf '%s' "$command" | grep -o -- '--prompt-file [^ ]*' | cut -d' ' -f2)"
+defects_file="$(printf '%s' "$command" | grep -o -- '--defects-file [^ ]*' | cut -d' ' -f2)"
+check_eq "escalation: prompt file holds the original prompt" "$(cat "$prompt_file")" "A red fox"
+check_eq "escalation: defects file holds the final defects" "$(jq -r '.[0].fix' "$defects_file")" "remove the smudge"
+
+# --- escalation: --rounds 0 (judge only) still yields a --rounds 1 command ---------
+run original.png --prompt "A red fox" --model acme/gen --critic acme/critic-fail-simple --rounds 0
+check_code "escalation, rounds 0: exit 0" "$code" 0
+command0="$(field .escalation.command)"
+check_eq "escalation, rounds 0: command uses --rounds 1, not --rounds 0" \
+  "$(printf '%s' "$command0" | grep -o -- '--rounds [0-9]*')" "--rounds 1"
+
+# --- escalation: --rounds 2 keeps --rounds 2 in the command -------------------------
+run original.png --prompt "A blue jay" --model acme/gen --critic acme/critic-worsening --rounds 2
+command2="$(field .escalation.command)"
+check_eq "escalation, rounds 2: command keeps --rounds 2" \
+  "$(printf '%s' "$command2" | grep -o -- '--rounds [0-9]*')" "--rounds 2"
+
+# --- escalation: options cut to 3, ordered by Jev probability, not price -----------
+run original.png --prompt "A red fox" --model acme/gen-sort --critic acme/critic-fail-simple --rounds 1 \
+  --tried "acme/gen,acme/gen-best,acme/gen-better,acme/gen-extra,acme/gen-cheap"
+check_code "escalation, sort order: exit 0" "$code" 0
+check_eq "escalation, sort order: at most 3 options" "$(field '.escalation.options | length')" "3"
+check_eq "escalation, sort order: recommended (highest probability) first" "$(field '.escalation.options[0].id')" "acme/gen-sort-b"
+check_eq "escalation, sort order: options ordered by probability descending, not price" \
+  "$(field '.escalation.options | map(.id) | join(",")')" "acme/gen-sort-b,acme/gen-sort-d,acme/gen-sort-a"
+check_eq "escalation, sort order: recommended is the top-probability model" "$(field .escalation.recommended)" "acme/gen-sort-b"
+
+# --- escalation: no key under pass, no escalation key at all -----------------------
+run original.png --prompt "A red fox" --model acme/gen --critic acme/critic-pass
+check_code "escalation, passing result: exit 0" "$code" 0
+check_eq "escalation, passing result: no escalation key" "$(field 'has("escalation")')" "false"
+check_eq "escalation, passing result: no escalation_error key" "$(field 'has("escalation_error")')" "false"
+
+# --- escalation: Jev failure never fails the run ------------------------------------
+run original.png --prompt "A red fox" --model acme/gen-jevboom --critic acme/critic-fail-simple --rounds 0
+check_code "escalation, Jev failure: exit 0" "$code" 0
+check_eq "escalation, Jev failure: no escalation key" "$(field 'has("escalation")')" "false"
+check_eq "escalation, Jev failure: escalation_error reports the JevError" "$(field .escalation_error | grep -c 'JevError')" "1"
+
+# --- escalation: no candidates left after --tried -----------------------------------
+run original.png --prompt "A red fox" --model acme/gen --critic acme/critic-fail-simple --rounds 0 \
+  --tried "acme/gen-cheap,acme/gen-best,acme/gen-better,acme/gen-extra,acme/gen-noimage-hi"
+check_code "escalation, no candidates: exit 0" "$code" 0
+check_eq "escalation, no candidates: no escalation key" "$(field 'has("escalation")')" "false"
+check_eq "escalation, no candidates: escalation_error reports it" "$(field .escalation_error | grep -c 'no escalation candidates')" "1"
+
+# --- escalation: --tried excludes those models from the next round -----------------
+run original.png --prompt "A red fox" --model acme/gen --critic acme/critic-fail-simple --rounds 0 \
+  --tried "acme/gen-best,acme/gen-better"
+check_code "escalation, --tried narrows candidates: exit 0" "$code" 0
+check_eq "escalation, --tried narrows candidates: only the untried one offered" \
+  "$(field '.escalation.options | map(.id) | join(",")')" "acme/gen-extra"
+check_eq "escalation, --tried narrows candidates: it is the recommendation" "$(field .escalation.recommended)" "acme/gen-extra"
+
+# --- --defects-file: seeds the first result, no critic call before the fix round ----
+cat > "$work/seed-defects.json" <<'EOF'
+[{"type": "artifact", "where": "a smudge", "box": null, "severity": 5, "fix": "remove the smudge"}]
+EOF
+run original.png --prompt "A red fox" --model acme/gen --critic acme/critic-pass --defects-file "$work/seed-defects.json" --rounds 1
+check_code "--defects-file: exit 0" "$code" 0
+check_eq "--defects-file: eventually passes through the fix round" "$(field .pass)" "true"
+chat_requests="$(jq -c 'select(.path=="/api/v1/chat/completions")' "$work/requests.jsonl")"
+check_eq "--defects-file: first chat call is the generator, not the critic" \
+  "$(printf '%s' "$chat_requests" | head -n1 | jq -r '.body.messages[0].role')" "user"
+check_eq "--defects-file: exactly one critic call, after the fix round" \
+  "$(printf '%s' "$chat_requests" | jq -r '.body.messages[0].role' | grep -c '^system$')" "1"
+ref_url2="$(printf '%s' "$chat_requests" | head -n1 | jq -r '.body.messages[0].content[1].image_url.url')"
+check_eq "--defects-file: fix round references the input file" \
+  "$(printf '%s' "$ref_url2" | sed 's/^data:image\/png;base64,//' | base64 -d | cmp -s - original.png && echo same || echo different)" "same"
+
+# --- naming: an escalated run on x.r1.png writes x.r2.png, not x.r1.r1.png ----------
+cp original.png escnaming.r1.png
+run escnaming.r1.png --prompt "A red fox" --model acme/gen --critic acme/critic-pass --defects-file "$work/seed-defects.json" --rounds 1
+check_code "naming: exit 0" "$code" 0
+check_eq "naming: continues the round count instead of restarting" "$(field .final)" "escnaming.r2.png"
+[ -s escnaming.r2.png ] && printf 'ok   naming: escnaming.r2.png written\n' || { printf 'FAIL naming: escnaming.r2.png missing\n'; fail=1; }
+
+# --- --request: a second, labelled input to the critic, and to any escalation ------
+REQUEST_TEXT='make it café-style, with a "cozy" awning'
+
+run original.png --prompt "A red fox" --model acme/gen --critic acme/critic-pass --request "$REQUEST_TEXT"
+check_code "--request: exit 0" "$code" 0
+req_body="$(jq -c 'select(.body.model=="acme/critic-pass")' "$work/requests.jsonl")"
+req_text="$(printf '%s' "$req_body" | jq -r '.body.messages[1].content[0].text')"
+check_eq "--request: prompt part labelled and present" "$(printf '%s' "$req_text" | grep -c "The prompt sent to the image generator:")" "1"
+check_eq "--request: request part labelled and holds the verbatim text" \
+  "$(printf '%s' "$req_text" | grep -c "The user's original request, verbatim:")" "1"
+check_eq "--request: the request text itself is present" "$(printf '%s' "$req_text" | grep -Fc "$REQUEST_TEXT")" "1"
+check_eq "--request: system message mentions the user's request" \
+  "$(printf '%s' "$req_body" | jq -r '.body.messages[0].content' | grep -c "user's original request")" "1"
+check_eq "--request: system message excludes non-visual parts of the request" \
+  "$(printf '%s' "$req_body" | jq -r '.body.messages[0].content' | grep -c "are ignored and never reported")" "1"
+
+run original.png --prompt "A red fox" --model acme/gen --critic acme/critic-pass
+check_code "no --request: exit 0" "$code" 0
+noreq_body="$(jq -c 'select(.body.model=="acme/critic-pass")' "$work/requests.jsonl")"
+check_eq "no --request: content is unchanged (one text part, the plain template)" \
+  "$(printf '%s' "$noreq_body" | jq -r '.body.messages[1].content[0].text')" \
+  "The image below was generated from this prompt:
+
+A red fox
+
+Judge it against the prompt and the checklist in your instructions. Reply with the JSON object described there, and nothing else."
+check_eq "no --request: system message is the built-in default, no request addendum" \
+  "$(printf '%s' "$noreq_body" | jq -r '.body.messages[0].content' | grep -c "user's original request")" "0"
+
+run original.png --prompt "A red fox" --model acme/gen --critic acme/critic-fail-simple --rounds 0 --request "$REQUEST_TEXT"
+check_code "--request escalation: exit 0" "$code" 0
+req_command="$(field .escalation.command)"
+check_eq "--request escalation: command carries --request-file" "$(printf '%s' "$req_command" | grep -c -- '--request-file')" "1"
+req_file="$(printf '%s' "$req_command" | grep -o -- '--request-file [^ ]*' | cut -d' ' -f2)"
+check_eq "--request escalation: request file holds the exact request text" "$(cat "$req_file")" "$REQUEST_TEXT"
+
+printf '%s' "$REQUEST_TEXT" > "$work/request.txt"
+run original.png --prompt "A red fox" --model acme/gen --critic acme/critic-pass --request "$REQUEST_TEXT" --request-file "$work/request.txt"
+check_code "--request and --request-file together: exit 2" "$code" 2
+
+exit $fail

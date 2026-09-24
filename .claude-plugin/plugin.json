@@ -1,0 +1,9 @@
+{
+  "name": "clouter",
+  "version": "0.1.0",
+  "description": "routes image, SVG, video and speech prompts to Jev-ranked OpenRouter models",
+  "author": {
+    "name": "Dimitri Tholen",
+    "email": "dtholen@gmail.com"
+  }
+}
