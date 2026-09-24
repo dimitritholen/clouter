@@ -21,6 +21,17 @@
     annotateBtn: document.getElementById('annotate-btn'),
     annotationPreview: document.getElementById('annotation-preview'),
     timelineMount: document.getElementById('timeline-mount'),
+    messagesSection: document.getElementById('messages-section'),
+    messagesList: document.getElementById('messages-list'),
+    modelPicker: document.getElementById('model-picker'),
+    modelOptionsList: document.getElementById('model-options-list'),
+    modelSuggestBtn: document.getElementById('model-suggest-btn'),
+    modelSuggestStatus: document.getElementById('model-suggest-status'),
+    modelManualBtn: document.getElementById('model-manual-btn'),
+    manualDialog: document.getElementById('manual-model-dialog'),
+    manualModelClose: document.getElementById('manual-model-close'),
+    manualModelSearch: document.getElementById('manual-model-search'),
+    manualModelList: document.getElementById('manual-model-list'),
     feedbackText: document.getElementById('feedback-text'),
     branchToggleWrap: document.getElementById('branch-toggle-wrap'),
     branchToggle: document.getElementById('branch-toggle'),
@@ -35,6 +46,9 @@
     selectedRound: null,
     pendingAnnotation: {}, // round n -> {annotation, notes}
     acceptedDefects: {}, // round n -> Set of defect ids
+    modelChoice: {}, // round n -> null (keep) | {type: 'suggested'|'manual', id, name}
+    catalogue: null, // null | 'loading' | 'error' | [entries]
+    catalogueError: null,
     timelineController: null,
     overlayEl: null,
     annotationOverlayEl: null,
@@ -119,6 +133,13 @@
 
   function isAudioType(mediaType) {
     return !!mediaType && mediaType.indexOf('audio/') === 0;
+  }
+
+  // price + unit, matching ranking.py's price_label formatting
+  function formatPrice(price, unit) {
+    if (typeof price !== 'number') return '';
+    if (price < 0.01) return '$' + (price * 1000).toFixed(4) + ' per 1K ' + unit + 's';
+    return '$' + price.toFixed(3) + ' per ' + unit;
   }
 
   // ---------- connection status ----------
@@ -269,8 +290,10 @@
       els.roundMeta.textContent = '';
       els.mediaView.innerHTML = '';
       els.briefDetails.hidden = true;
+      els.messagesSection.hidden = true;
       els.defectsSection.hidden = true;
       els.annotationSection.hidden = true;
+      els.modelPicker.hidden = true;
       return;
     }
 
@@ -289,10 +312,289 @@
     els.briefDetails.hidden = false;
     els.briefText.textContent = round.brief || '';
 
+    renderMessages(round);
     renderDefects(round);
     renderAnnotationSection(round);
     renderBranchToggle(round);
+    renderModelPicker(round);
   }
+
+  // ---------- messages ----------
+
+  function renderMessages(round) {
+    var hasSummary = !!round.summary;
+    var hasMessage = !!round.message;
+    els.messagesList.innerHTML = '';
+    if (!hasSummary && !hasMessage) {
+      els.messagesSection.hidden = true;
+      return;
+    }
+    els.messagesSection.hidden = false;
+
+    if (hasSummary) {
+      var critic = document.createElement('div');
+      critic.className = 'message-bubble message-critic';
+      var criticAuthor = document.createElement('span');
+      criticAuthor.className = 'message-author';
+      criticAuthor.textContent = 'Critic';
+      var criticText = document.createElement('p');
+      criticText.textContent = round.summary;
+      critic.appendChild(criticAuthor);
+      critic.appendChild(criticText);
+      if (round.model_trouble) {
+        var trouble = document.createElement('p');
+        trouble.className = 'message-trouble';
+        trouble.textContent = 'The critic thinks this model is struggling — pick another model below.';
+        critic.appendChild(trouble);
+      }
+      els.messagesList.appendChild(critic);
+    }
+
+    if (hasMessage) {
+      var claude = document.createElement('div');
+      claude.className = 'message-bubble message-claude';
+      var claudeAuthor = document.createElement('span');
+      claudeAuthor.className = 'message-author';
+      claudeAuthor.textContent = 'Claude';
+      var claudeText = document.createElement('p');
+      claudeText.textContent = round.message;
+      claude.appendChild(claudeAuthor);
+      claude.appendChild(claudeText);
+      els.messagesList.appendChild(claude);
+    }
+  }
+
+  // ---------- model picker ----------
+
+  function addModelOption(name, value, label, checked, probability, referenceSupported) {
+    var opt = document.createElement('label');
+    opt.className = 'model-option';
+
+    var radio = document.createElement('input');
+    radio.type = 'radio';
+    radio.name = name;
+    radio.value = value;
+    radio.checked = checked;
+
+    var text = document.createElement('span');
+    text.className = 'model-option-label';
+    text.textContent = label;
+
+    opt.appendChild(radio);
+    opt.appendChild(text);
+
+    if (referenceSupported) {
+      var badge = document.createElement('span');
+      badge.className = 'ref-badge';
+      badge.textContent = 'ref';
+      opt.appendChild(badge);
+    }
+
+    if (typeof probability === 'number') {
+      var prob = document.createElement('span');
+      prob.className = 'model-option-prob';
+      prob.textContent = Math.round(probability * 100) + '%';
+      opt.appendChild(prob);
+    }
+
+    return { el: opt, radio: radio };
+  }
+
+  function renderModelPicker(round) {
+    els.modelPicker.hidden = false;
+    els.modelOptionsList.innerHTML = '';
+
+    var choice = state.modelChoice[round.n] || null;
+    if (choice && choice.type === 'suggested') {
+      var stillThere = (round.models || []).some(function (m) { return m.id === choice.id; });
+      if (!stillThere) {
+        choice = null;
+        state.modelChoice[round.n] = null;
+      }
+    }
+
+    var radioName = 'model-choice-' + round.n;
+
+    var keep = addModelOption(radioName, 'keep', 'Keep ' + (round.model || 'current model'), !choice);
+    keep.radio.addEventListener('change', function () {
+      state.modelChoice[round.n] = null;
+    });
+    els.modelOptionsList.appendChild(keep.el);
+
+    (round.models || []).forEach(function (m) {
+      var label = m.name + ' — ' + formatPrice(m.price, m.unit);
+      var selected = !!choice && choice.type === 'suggested' && choice.id === m.id;
+      var row = addModelOption(radioName, m.id, label, selected, m.probability, m.reference_supported);
+      row.radio.addEventListener('change', function () {
+        state.modelChoice[round.n] = { type: 'suggested', id: m.id, name: m.name };
+      });
+      els.modelOptionsList.appendChild(row.el);
+    });
+
+    if (choice && choice.type === 'manual') {
+      var manualRow = addModelOption(radioName, choice.id, 'Manual: ' + choice.name, true);
+      manualRow.radio.addEventListener('change', function () {
+        state.modelChoice[round.n] = choice;
+      });
+      els.modelOptionsList.appendChild(manualRow.el);
+    }
+
+    var s = state.session;
+    var modelsRequest = s && s.models_request;
+    var pendingForRound = !!modelsRequest && modelsRequest.round === round.n && modelsRequest.status === 'pending';
+    var errorForRound = !!modelsRequest && modelsRequest.round === round.n && modelsRequest.status === 'error';
+
+    var accepted = s && s.state === 'accepted';
+    els.modelSuggestBtn.disabled = pendingForRound || accepted;
+    if (pendingForRound) {
+      els.modelSuggestStatus.hidden = false;
+      els.modelSuggestStatus.className = 'model-suggest-status';
+      els.modelSuggestStatus.textContent = 'asking Jev…';
+    } else if (errorForRound) {
+      els.modelSuggestStatus.hidden = false;
+      els.modelSuggestStatus.className = 'model-suggest-status error';
+      els.modelSuggestStatus.textContent = modelsRequest.error || 'Failed to fetch model suggestions.';
+    } else {
+      els.modelSuggestStatus.hidden = true;
+      els.modelSuggestStatus.textContent = '';
+    }
+  }
+
+  els.modelSuggestBtn.addEventListener('click', function () {
+    var round = state.selectedRound;
+    if (round == null) return;
+    els.modelSuggestBtn.disabled = true;
+    fetch('/api/models', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ round: round })
+    }).then(function (res) {
+      return res.json().then(function (data) { return { ok: res.ok, status: res.status, data: data }; });
+    }).then(function (r) {
+      if (!r.ok && r.status !== 409) {
+        showError((r.data && r.data.error) || 'Failed to request model suggestions.');
+      }
+    }).catch(function (e) {
+      showError('Network error requesting model suggestions: ' + e);
+    }).finally(function () {
+      var round2 = currentRound();
+      if (round2) renderModelPicker(round2);
+    });
+  });
+
+  // ---------- manual model dialog ----------
+
+  function loadCatalogue() {
+    if (state.catalogue === 'loading' || Array.isArray(state.catalogue)) return;
+    state.catalogue = 'loading';
+    renderManualModelList();
+    fetch('/api/catalogue').then(function (res) {
+      return res.json().then(function (data) { return { ok: res.ok, data: data }; });
+    }).then(function (r) {
+      if (!r.ok) {
+        state.catalogue = 'error';
+        state.catalogueError = (r.data && r.data.error) || 'Failed to load catalogue.';
+      } else {
+        state.catalogue = (r.data && r.data.models) || [];
+      }
+      renderManualModelList();
+    }).catch(function (e) {
+      state.catalogue = 'error';
+      state.catalogueError = 'Network error loading catalogue: ' + e;
+      renderManualModelList();
+    });
+  }
+
+  function renderManualModelList() {
+    var listEl = els.manualModelList;
+    listEl.innerHTML = '';
+
+    if (state.catalogue === 'loading') {
+      var loading = document.createElement('p');
+      loading.className = 'manual-model-empty';
+      loading.textContent = 'Loading catalogue…';
+      listEl.appendChild(loading);
+      return;
+    }
+    if (state.catalogue === 'error') {
+      var errEl = document.createElement('p');
+      errEl.className = 'manual-model-empty';
+      errEl.textContent = state.catalogueError || 'Failed to load catalogue.';
+      listEl.appendChild(errEl);
+      return;
+    }
+
+    var q = els.manualModelSearch.value.trim().toLowerCase();
+    var items = (state.catalogue || []).filter(function (m) {
+      if (!q) return true;
+      return (m.id || '').toLowerCase().indexOf(q) !== -1 || (m.name || '').toLowerCase().indexOf(q) !== -1;
+    });
+
+    if (!items.length) {
+      var empty = document.createElement('p');
+      empty.className = 'manual-model-empty';
+      empty.textContent = 'No matching models.';
+      listEl.appendChild(empty);
+      return;
+    }
+
+    items.forEach(function (m) {
+      var row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'manual-model-row';
+
+      var name = document.createElement('span');
+      name.className = 'manual-model-name';
+      name.textContent = m.name;
+
+      var id = document.createElement('span');
+      id.className = 'manual-model-id';
+      id.textContent = m.id;
+
+      row.appendChild(name);
+      row.appendChild(id);
+
+      if (m.reference_supported) {
+        var badge = document.createElement('span');
+        badge.className = 'ref-badge';
+        badge.textContent = 'ref';
+        row.appendChild(badge);
+      }
+
+      var price = document.createElement('span');
+      price.className = 'manual-model-price';
+      price.textContent = formatPrice(m.price, m.unit);
+      row.appendChild(price);
+
+      row.addEventListener('click', function () {
+        pickManualModel(m);
+      });
+      listEl.appendChild(row);
+    });
+  }
+
+  function pickManualModel(m) {
+    var round = state.selectedRound;
+    if (round == null) return;
+    state.modelChoice[round] = { type: 'manual', id: m.id, name: m.name };
+    els.manualDialog.close();
+    var round2 = currentRound();
+    if (round2) renderModelPicker(round2);
+  }
+
+  els.modelManualBtn.addEventListener('click', function () {
+    els.manualModelSearch.value = '';
+    els.manualDialog.showModal();
+    loadCatalogue();
+    renderManualModelList();
+    els.manualModelSearch.focus();
+  });
+
+  els.manualModelClose.addEventListener('click', function () {
+    els.manualDialog.close();
+  });
+
+  els.manualModelSearch.addEventListener('input', renderManualModelList);
 
   function buildMedia(round) {
     els.mediaView.innerHTML = '';
@@ -566,12 +868,14 @@
     var notes = pending ? (pending.notes || []) : [];
     var newest = newestRoundNumber();
     var branch_from = (els.branchToggle.checked && round !== newest) ? round : null;
+    var modelChoice = state.modelChoice[round] || null;
+    var model = modelChoice ? modelChoice.id : undefined;
 
     var afterMarkers = function (markers) {
       markers = markers || [];
-      var hasContent = !!text || accepted_defects.length > 0 || !!annotation || notes.length > 0 || markers.length > 0;
+      var hasContent = !!text || accepted_defects.length > 0 || !!annotation || notes.length > 0 || markers.length > 0 || !!modelChoice;
       if (!hasContent) {
-        showError('Add feedback text, accept a defect, or attach an annotation/notes before sending.');
+        showError('Add feedback text, accept a defect, attach an annotation/notes, or pick a model before sending.');
         return;
       }
       clearError();
@@ -586,7 +890,8 @@
           accepted_defects: accepted_defects,
           notes: notes,
           markers: markers,
-          annotation: annotation
+          annotation: annotation,
+          model: model
         })
       }).then(function (res) {
         return res.json().then(function (data) { return { ok: res.ok, data: data }; });
@@ -598,10 +903,12 @@
         saveDraft(round, '');
         els.feedbackText.value = '';
         delete state.pendingAnnotation[round];
+        delete state.modelChoice[round];
         var r2 = findRound(round);
         if (r2) renderAnnotationPreview(r2);
         if (state.acceptedDefects[round]) state.acceptedDefects[round].clear();
         renderDefects(r2 || {});
+        if (r2) renderModelPicker(r2);
       }).catch(function (e) {
         showError('Network error sending feedback: ' + e);
       }).finally(function () {
@@ -679,6 +986,8 @@
     els.acceptBtn.disabled = accepted;
     els.feedbackText.disabled = accepted;
     els.branchToggle.disabled = accepted;
+    els.modelPicker.disabled = accepted;
+    els.modelManualBtn.disabled = accepted;
 
     els.workingBanner.hidden = !working;
     if (working) {

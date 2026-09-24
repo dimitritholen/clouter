@@ -3,8 +3,8 @@
 
     studio.py serve  --session <dir> [--no-open] [--idle-minutes 30]
     studio.py push   --session <dir> --file <path> --model <id> --cost <usd>
-                     --brief-file <path> [--defects-file <json>] [--parent <n>]
-                     [--request-file <path>] [--modality <m>]
+                     --brief-file <path> [--defects-file <json>] [--message-file <path>]
+                     [--parent <n>] [--request-file <path>] [--modality <m>]
     studio.py wait   --session <dir> [--timeout <seconds>]
     studio.py stop   --session <dir>
     studio.py status --session <dir>
@@ -34,7 +34,12 @@ GET /events (SSE: `event: session` with the full session on connect and
 on every change of session.json, polled every 0.5 s; `: ping` every
 15 s), GET /files/<relpath> (only under rounds/ or uploads/, anything
 else 404), POST /api/upload?kind=annotation|frame (raw PNG, max 20 MB),
-POST /api/feedback and POST /api/accept. JSON errors are
+POST /api/feedback (accepts an optional "model" id for the next round),
+POST /api/accept, POST /api/models {"round": n} (202, asks
+critique.model_options in a background thread for alternative generator
+models and stores them on the round; 409 while one is already pending)
+and GET /api/catalogue (every catalogue model for the session's
+modality, cached in memory for 10 minutes). JSON errors are
 {"error": "..."} with a 4xx status. The server exits after
 --idle-minutes without an SSE client, or 60 s after an accept, and
 removes server.json on exit.
@@ -82,6 +87,7 @@ MODALITIES = ("raster_image", "vector_svg", "video", "speech")
 UPLOAD_KINDS = ("annotation", "frame")
 MAX_UPLOAD = 20 * 1024 * 1024
 MAX_JSON = 1024 * 1024
+CATALOGUE_TTL_SECONDS = 600
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 POLL_SECONDS = 0.5
 PING_SECONDS = 15
@@ -222,6 +228,24 @@ def content_type(path):
     return EXT_MEDIA.get(ext) or mimetypes.guess_type(path)[0] or "application/octet-stream"
 
 
+# --- lazy imports of critique.py/catalogue.py --------------------------------
+# Deferred to the handlers that need them, so `push`/`wait`/`stop`/`status`
+# stay fast and never need an API key.
+
+def _import_critique():
+    if HERE not in sys.path:
+        sys.path.insert(0, HERE)
+    import critique
+    return critique
+
+
+def _import_catalogue():
+    if HERE not in sys.path:
+        sys.path.insert(0, HERE)
+    import catalogue
+    return catalogue
+
+
 # --- server -----------------------------------------------------------------
 
 class Studio:
@@ -237,6 +261,8 @@ class Studio:
         self.accepted_at = None
         self.stopping = threading.Event()
         self.mtime = self._mtime()
+        self.catalogue_lock = threading.Lock()
+        self.catalogue_cache = None  # (modality, expiry_monotonic, entries) or None
 
     def _mtime(self):
         try:
@@ -353,6 +379,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.get_static(path[len("/static/"):])
             if path == "/api/session":
                 return self.send_json(load_session(self.studio.dir))
+            if path == "/api/catalogue":
+                return self.get_catalogue()
             if path == "/events":
                 return self.get_events()
             if path.startswith("/files/"):
@@ -380,6 +408,29 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not ok:
             return self.send_error_json(404, "not found")
         return self.send_file(os.path.realpath(full), content_type(full))
+
+    def get_catalogue(self):
+        studio = self.studio
+        try:
+            modality = load_session(studio.dir).get("modality")
+        except (OSError, ValueError) as e:
+            return self.send_error_json(500, f"cannot read session: {e}")
+        with studio.catalogue_lock:
+            cached = studio.catalogue_cache
+            if cached and cached[0] == modality and time.monotonic() < cached[1]:
+                return self.send_json({"models": cached[2]})
+        catalogue = _import_catalogue()
+        try:
+            found = catalogue.models(modality)
+        except catalogue.CatalogueError as e:
+            return self.send_error_json(502, str(e))
+        entries = sorted(
+            ({"id": e["id"], "name": e["name"], "price": e["price"], "unit": e["unit"],
+              "reference_supported": bool(e.get("reference_supported"))} for e in found),
+            key=lambda e: (e["price"] is None, e["price"] if e["price"] is not None else 0.0))
+        with studio.catalogue_lock:
+            studio.catalogue_cache = (modality, time.monotonic() + CATALOGUE_TTL_SECONDS, entries)
+        return self.send_json({"models": entries})
 
     def get_events(self):
         studio = self.studio
@@ -431,6 +482,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.post_entry("feedback")
             if url.path == "/api/accept":
                 return self.post_entry("accept")
+            if url.path == "/api/models":
+                return self.post_models()
         except (BrokenPipeError, ConnectionResetError):
             return None
         return self.send_error_json(404, "not found")
@@ -477,10 +530,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not isinstance(body, dict):
             return self.send_error_json(400, "body must be a JSON object")
         d = self.studio.dir
+        with self.studio.catalogue_lock:
+            cached = self.studio.catalogue_cache
+        catalogue_ids = {m["id"] for m in cached[2]} if cached else None
         with locked(d):
             session = load_session(d)
             try:
-                entry = build_entry(d, session, action, body)
+                entry = build_entry(d, session, action, body, catalogue_ids=catalogue_ids)
             except ValueError as e:
                 return self.send_error_json(400, str(e))
             session.setdefault("feedback", []).append(entry)
@@ -489,8 +545,65 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.studio.changed()
         return self.send_json({"id": entry["id"]})
 
+    def post_models(self):
+        length = self.content_length(MAX_JSON)
+        if length is None:
+            return None
+        try:
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except ValueError:
+            return self.send_error_json(400, "body is not JSON")
+        if not isinstance(body, dict):
+            return self.send_error_json(400, "body must be a JSON object")
+        d = self.studio.dir
+        with locked(d):
+            session = load_session(d)
+            rounds = {r.get("n") for r in session.get("rounds", [])}
+            n = body.get("round")
+            if isinstance(n, bool) or not isinstance(n, int) or n not in rounds:
+                return self.send_error_json(400, "round must be an existing round number")
+            pending = session.get("models_request")
+            if pending and pending.get("status") == "pending":
+                return self.send_error_json(409, "a model suggestion request is already pending")
+            session["models_request"] = {"round": n, "status": "pending"}
+            save_session(d, session)
+        self.studio.changed()
+        threading.Thread(target=run_model_options, args=(d, self.studio, n), daemon=True).start()
+        return self.send_json({"status": "pending"}, 202)
 
-def build_entry(d, session, action, body):
+
+def run_model_options(d, studio, n):
+    """Background thread body for POST /api/models: rank alternative generator
+    models for round n and write them to session.json, notifying over SSE."""
+    critique = _import_critique()
+    try:
+        with locked(d):
+            session = load_session(d)
+        round_ = next((r for r in session.get("rounds", []) if r.get("n") == n), {})
+        exclude = {r.get("model") for r in session.get("rounds", []) if r.get("model")}
+        key = critique.keys.get("OPENROUTER_API_KEY")  # raises MissingKey/UnsafeFile
+        found = critique.model_options(
+            session.get("modality"), round_.get("brief") or "", request=session.get("request"),
+            defects=round_.get("defects"), exclude=exclude, key=key)
+    except Exception as e:  # noqa: BLE001 - any failure is reported to the page, never crashes the thread
+        with locked(d):
+            session = load_session(d)
+            session["models_request"] = {"round": n, "status": "error", "error": str(e)}
+            save_session(d, session)
+        studio.changed()
+        return
+    with locked(d):
+        session = load_session(d)
+        for r in session.get("rounds", []):
+            if r.get("n") == n:
+                r["models"] = found
+                break
+        session["models_request"] = {"round": n, "status": "done"}
+        save_session(d, session)
+    studio.changed()
+
+
+def build_entry(d, session, action, body, catalogue_ids=None):
     """Validate a POSTed feedback/accept body into a feedback entry; ValueError on bad input."""
     rounds = {r.get("n") for r in session.get("rounds", [])}
 
@@ -531,6 +644,12 @@ def build_entry(d, session, action, body):
         raise ValueError("markers must be a list of objects")
     markers = [{"t": number(m.get("t"), "markers[].t"), "text": str(m.get("text") or ""),
                 "frame": upload_ref(m.get("frame"), "markers[].frame")} for m in markers]
+    model = body.get("model")
+    if model is not None:
+        if not isinstance(model, str) or not (1 <= len(model) <= 200):
+            raise ValueError("model must be a string of 1 to 200 characters")
+        if catalogue_ids is not None and model not in catalogue_ids:
+            raise ValueError("model must be a known catalogue model id")
     ids = [e.get("id", 0) for e in session.get("feedback", []) if isinstance(e.get("id"), int)]
     return {
         "id": max(ids, default=0) + 1,
@@ -542,6 +661,7 @@ def build_entry(d, session, action, body):
         "notes": notes,
         "markers": markers,
         "annotation": upload_ref(body.get("annotation"), "annotation"),
+        "model": model,
         "created": now_iso(),
         "consumed": False,
     }
@@ -646,14 +766,22 @@ def push(args):
     if media_type not in MEDIA_EXT:
         raise UsageError(f"unsupported media type for {args.file}")
     brief = read_text(args.brief_file, "brief file")
+    message = read_text(args.message_file, "message file") if args.message_file else None
     defects = []
+    summary = model_trouble = models = models_error = None
     if args.defects_file:
         try:
-            defects = json.loads(read_text(args.defects_file, "defects file"))
+            parsed = json.loads(read_text(args.defects_file, "defects file"))
         except ValueError:
             raise UsageError(f"defects file {args.defects_file} is not JSON") from None
-        if isinstance(defects, dict):  # critique.py --suggest writes {"defects": [...]}
-            defects = defects.get("defects")
+        if isinstance(parsed, dict):  # critique.py --suggest writes {"defects": [...], "summary", ...}
+            defects = parsed.get("defects")
+            summary = parsed.get("summary")
+            model_trouble = parsed.get("model_trouble")
+            models = parsed.get("models")
+            models_error = parsed.get("models_error")
+        else:
+            defects = parsed
         if not isinstance(defects, list):
             raise UsageError("defects file must hold a JSON list or {\"defects\": [...]}")
     request = read_text(args.request_file, "request file") if args.request_file else None
@@ -674,9 +802,20 @@ def push(args):
         n = max((r.get("n", 0) for r in rounds), default=0) + 1
         rel = f"rounds/round-{n}.{MEDIA_EXT[media_type]}"
         shutil.copyfile(args.file, os.path.join(d, rel))
-        rounds.append({"n": n, "file": rel, "media_type": media_type, "model": args.model,
+        round_entry = {"n": n, "file": rel, "media_type": media_type, "model": args.model,
                        "cost": args.cost, "brief": brief, "parent": args.parent,
-                       "defects": defects, "created": now_iso()})
+                       "defects": defects, "created": now_iso()}
+        if message is not None:
+            round_entry["message"] = message
+        if summary is not None:
+            round_entry["summary"] = summary
+        if model_trouble is not None:
+            round_entry["model_trouble"] = model_trouble
+        if models is not None:
+            round_entry["models"] = models
+        if models_error is not None:
+            round_entry["models_error"] = models_error
+        rounds.append(round_entry)
         session["state"] = "waiting"
         save_session(d, session)
     url = start_server(d)
@@ -781,6 +920,7 @@ def main(argv):
     p.add_argument("--cost", type=float, required=True)
     p.add_argument("--brief-file", required=True)
     p.add_argument("--defects-file")
+    p.add_argument("--message-file")
     p.add_argument("--parent", type=int)
     p.add_argument("--request-file")
     p.add_argument("--modality", choices=MODALITIES)

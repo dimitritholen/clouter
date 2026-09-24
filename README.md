@@ -44,6 +44,11 @@ the clean previous round as a reference image where appropriate), and pushes
 the next round, until you press Accept. Session state is saved in
 `~/.cache/clouter/studio/<id>/` (session.json, rounds/, uploads/).
 
+The critic's feedback appears in the page: a summary of the round, a note if
+the model is struggling with the brief, and (when it is) a picker for
+alternative models. You can always ask for a fresh set of Jev-ranked model
+choices, or pick any model from the catalogue by hand.
+
 ## Install
 
 Install from the marketplace:

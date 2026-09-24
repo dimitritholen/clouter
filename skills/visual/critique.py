@@ -8,11 +8,15 @@ fix what's wrong, for up to --rounds tries.
                 [--defects-file <path>] [--tried <id,id,...>]
                 [--request <text> | --request-file <path>]
     critique.py <file> (--prompt <text> | --prompt-file <path>) --suggest --out <defects.json>
-                [--critic <model id>] [--request <text> | --request-file <path>]
+                [--model <generator model id>] [--critic <model id>]
+                [--request <text> | --request-file <path>]
     critique.py <file> --translate --out <instructions.json>
                 [--annotation <layer.png>] [--notes-file <json>] [--text-file <path>]
                 [--frames-file <json>] [--critic <model id>]
                 [--request <text> | --request-file <path>]
+    critique.py --models --modality <raster_image|vector_svg|video|speech>
+                (--prompt <text> | --prompt-file <path>) [--request <text> | --request-file <path>]
+                [--defects-file <path>] [--exclude id,id,...] --out <models.json>
 
 <file> is the image or SVG generate.py already wrote (video and speech
 files are refused: critique only judges images/svg). The critic (default
@@ -83,8 +87,34 @@ instead, the same way a critic failure never fails generate.py.
 
 --suggest (the studio's critic suggestions) judges <file> once, never
 calls a generator and never builds an escalation, and writes
-{"defects": [...]} to --out: each defect keeps type/where/box/severity/fix
-and gains a stable id "d1", "d2", ... in the critic's order.
+{"defects": [...], "summary": "...", "model_trouble": bool} to --out: each
+defect keeps type/where/box/severity/fix and gains a stable id "d1", "d2",
+... in the critic's order. summary and model_trouble come from the same
+critic call as the defects (no extra request): summary is one to three
+plain sentences (overall verdict, what works, what the model got wrong),
+"" when the critic didn't give one; model_trouble is the critic's own
+verdict when it gives a bool, else true when any defect is prompt_adherence
+at severity >= 4. When model_trouble is true, "models" is also written:
+up to 4 Jev-ranked alternative generator models (model_options() below),
+excluding --model (the round's own generator, optional for --suggest; with
+no --model, nothing is excluded). A ranking failure never fails --suggest:
+"models" is omitted and "models_error": "<message>" is written instead.
+
+model_options(modality, prompt, request=None, defects=None, exclude=(),
+key=None, limit=4) ranks alternative generator models for modality against
+the brief (prompt), the user's request and the current defects, the same
+way build_escalation ranks its own candidates (catalogue.py's priced list,
+Jev through ranking.py): [{"id", "name", "price", "unit", "probability",
+"reference_supported"}], best first, excluding ids in exclude. Raises like
+build_escalation (ValueError, keys.MissingKey/UnsafeFile,
+generate.ApiError, catalogue.CatalogueError, lib.jev.JevError) instead of
+ever setting an escalation_error itself; callers decide how to handle that.
+
+--models is the CLI-only wrapper around model_options: no <file>, judging
+or generator model.  --modality picks the catalogue; --defects-file and
+--request/--request-file feed the same ranking question suggest's internal
+call does; --exclude is a comma-separated list of model ids to leave out.
+Writes {"models": [...]} to --out.
 
 --translate (the studio's feedback) sends the vision critic the clean
 <file>; the pen layer --annotation alpha-composited over it (through
@@ -100,11 +130,12 @@ only the frames are. At least one of the four inputs is required. The
 critic answers {"instructions": [{"where", "box", "instruction",
 "source": pen|note|text|marker}]}, written to --out plus "cost".
 
-Both print {"out": path, "cost": USD or null, "critic": model id} on
-stdout. Also importable: suggest(path, prompt, critic=None, key=None,
-request=None) and translate_annotations(image_path, annotation_png,
-notes, text, request=None, critic=None, key=None, frames=None), each
-returning the written JSON plus "cost" and "critic".
+--suggest and --translate print {"out": path, "cost": USD or null,
+"critic": model id} on stdout; --models prints {"out": path, "cost": null}
+(no critic is called). Also importable: suggest(path, prompt, critic=None,
+key=None, request=None, model=None) and translate_annotations(image_path,
+annotation_png, notes, text, request=None, critic=None, key=None,
+frames=None), each returning the written JSON plus "cost" and "critic".
 
 Every critic call is logged through generate.log_generation with
 modality "critique"; every fix generation is logged the same way
@@ -128,7 +159,7 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
 sys.path.insert(0, HERE)
-from lib import keys, png  # noqa: E402
+from lib import jev, keys, png  # noqa: E402
 import catalogue  # noqa: E402
 import generate  # noqa: E402
 import preview  # noqa: E402
@@ -166,6 +197,20 @@ localised. severity is 1 (cosmetic) to 5 (breaks the image). fix is one imperati
 telling the generator exactly what to change. Do not report taste or style preferences
 ("could be more vibrant", "I'd use a different palette") — only concrete defects. Set
 pass true only when you find nothing you would rate severity 3 or higher."""
+
+# --suggest asks the same critic the same question, but in one extra breath also wants a
+# plain-language summary and a verdict on whether the model itself is the problem, so the
+# studio doesn't need a second request for those. Built by inserting the two extra fields
+# into CRITIC_SYSTEM's own schema line, so the checklist itself stays in one place.
+SUGGEST_SYSTEM = CRITIC_SYSTEM.replace(
+    '{"pass": bool, "defects":',
+    '{"pass": bool, '
+    '"summary": "one to three plain sentences: overall verdict, what works, what the model got wrong", '
+    '"model_trouble": bool (true when the model itself is failing to follow the prompt, for instance '
+    'any prompt_adherence defect at severity 4 or 5, false otherwise), '
+    '"defects":',
+    1,
+)
 
 CRITIC_USER_TEMPLATE = (
     "The image below was generated from this prompt:\n\n{prompt}\n\n"
@@ -353,6 +398,28 @@ def judge(path, prompt, critic, key, request=None):
     return {"pass": passed, "defects": defects, "cost": cost}
 
 
+def _model_trouble(defects, model_trouble):
+    """The critic's own model_trouble verdict when it gave one; otherwise true when any
+    defect is prompt_adherence at severity >= 4."""
+    if isinstance(model_trouble, bool):
+        return model_trouble
+    return any(d.get("type") == "prompt_adherence" and (d.get("severity") or 0) >= 4 for d in defects)
+
+
+def suggest_judge(path, prompt, critic, key, request=None):
+    """One judged round for --suggest: like judge(), plus a plain-language summary and a
+    model_trouble verdict, asked in the same critic call (SUGGEST_SYSTEM's extended schema).
+    {"defects": [...], "summary": str, "model_trouble": bool, "cost": float|None}. summary is
+    "" when the critic didn't give one. Raises CritiqueParseError like judge()."""
+    system = SUGGEST_SYSTEM + (REQUEST_SYSTEM_ADDENDUM if request else "")
+    parsed, cost = ask_critic(critic, key, system, build_content(path, prompt, request), path)
+    defects = [d for d in (parsed.get("defects") or []) if isinstance(d, dict)]
+    summary = parsed.get("summary")
+    summary = summary.strip() if isinstance(summary, str) else ""
+    return {"defects": defects, "summary": summary,
+            "model_trouble": _model_trouble(defects, parsed.get("model_trouble")), "cost": cost}
+
+
 def ask_critic(critic, key, system, content, log_path):
     """One strict-JSON chat call to the critic: (parsed dict, cost). The
     call is logged against log_path with modality "critique". Raises
@@ -420,8 +487,58 @@ ESCALATION_CANDIDATES = 10
 ESCALATION_TIMEOUT = 15.0
 
 
+MODEL_OPTIONS_CANDIDATES = ESCALATION_CANDIDATES
+MODEL_OPTIONS_QUESTION = (
+    "Which model is the best alternative for this brief? Weigh capability for the modality "
+    "and any known defects above price."
+)
+
+
 def _defect_state(defects):
-    return [{"type": d.get("type"), "severity": d.get("severity"), "fix": d.get("fix")} for d in defects]
+    return [{"type": d.get("type"), "severity": d.get("severity"), "fix": d.get("fix")} for d in (defects or [])]
+
+
+def _rank_entries(entries, prompt, modality, current_model, defects, question, floor, timeout, limit, request=None):
+    """Jev-rank entries (catalogue.py entries: id/name/description/price/unit/...) against the
+    brief, best `limit` first: the recommended pick (if any, its confidence >= floor) first,
+    then the rest by probability descending, cheapest first on a tie. Shared by
+    build_escalation and model_options so both rank through one implementation. Returns
+    (ordered entries, recommended id or None). Raises lib.jev.JevError, keys.MissingKey/
+    UnsafeFile."""
+    state = {"prompt": prompt, "modality": modality, "current_model": current_model,
+             "defects": _defect_state(defects)}
+    if request:
+        state["request"] = request
+    ranked, recommended = ranking.rank_models(entries, state, question, floor, timeout)
+    recommended_id = recommended["id"] if recommended else None
+    ordered = sorted(ranked, key=lambda e: (e["id"] != recommended_id, -e["probability"], e["price"]))
+    return ordered[:limit], recommended_id
+
+
+def model_options(modality, prompt, request=None, defects=None, exclude=(), key=None, limit=4):
+    """Jev-rank alternative generator models for `modality` given the brief (prompt), the
+    user's request and the current defects. Returns
+    [{"id","name","price","unit","probability","reference_supported"}], best first,
+    excluding ids in `exclude`. Shares its ranking with build_escalation through
+    _rank_entries: catalogue.py's priced list, ranked by ranking.py the way route.py ranks
+    its own choices. key is accepted for interface symmetry with the rest of this module;
+    catalogue.py and ranking.py find their own credentials through lib.keys. Raises
+    ValueError (no candidates left after exclude), keys.MissingKey/UnsafeFile,
+    generate.ApiError, catalogue.CatalogueError or lib.jev.JevError on a failed
+    catalogue/ranking call."""
+    floor = float(os.environ.get("CLOUTER_VISUAL_FLOOR", "0.5"))
+    exclude_ids = set(exclude)
+    all_entries = catalogue.models(modality, timeout=ESCALATION_TIMEOUT)
+    entries = [e for e in all_entries if e["price"] is not None and e["id"] not in exclude_ids]
+    entries = entries[:MODEL_OPTIONS_CANDIDATES]
+    if not entries:
+        raise ValueError("no candidate models")
+    ordered, _recommended_id = _rank_entries(
+        entries, prompt, modality, None, defects, MODEL_OPTIONS_QUESTION, floor, ESCALATION_TIMEOUT,
+        limit, request=request)
+    return [{"id": e["id"], "name": e["name"], "price": e["price"], "unit": e["unit"],
+             "probability": e["probability"], "reference_supported": bool(e.get("reference_supported"))}
+            for e in ordered]
 
 
 def build_escalation(prompt, gen_model, modality, final_path, defects, tried, rounds,
@@ -453,21 +570,10 @@ def build_escalation(prompt, gen_model, modality, final_path, defects, tried, ro
     if not entries:
         raise ValueError("no escalation candidates")
 
-    ranked, recommended = ranking.rank_models(
-        entries,
-        {"prompt": prompt, "modality": modality, "current_model": gen_model,
-         "defects": _defect_state(defects)},
-        ESCALATION_QUESTION,
-        floor,
-        ESCALATION_TIMEOUT,
-    )
-    recommended_id = recommended["id"] if recommended else None
-    by_probability = sorted(
-        ranked,
-        key=lambda e: (e["id"] != recommended_id, -e["probability"], e["price"]),
-    )[:3]
+    ordered, recommended_id = _rank_entries(
+        entries, prompt, modality, gen_model, defects, ESCALATION_QUESTION, floor, ESCALATION_TIMEOUT, 3)
     options_list = [{"id": e["id"], "name": e["name"], "price": e["price"], "unit": e["unit"],
-                      "probability": e["probability"]} for e in by_probability]
+                      "probability": e["probability"]} for e in ordered]
 
     tmp_dir = tempfile.mkdtemp(prefix="clouter-critique-")
     prompt_path = os.path.join(tmp_dir, "prompt.txt")
@@ -495,8 +601,7 @@ def build_escalation(prompt, gen_model, modality, final_path, defects, tried, ro
             f.write(request)
         parts += ["--request-file", shlex.quote(request_path)]
 
-    return {"options": options_list, "recommended": recommended["id"] if recommended else None,
-            "command": " ".join(parts)}
+    return {"options": options_list, "recommended": recommended_id, "command": " ".join(parts)}
 
 
 def check_judgeable(path):
@@ -516,20 +621,33 @@ def check_judgeable(path):
 SUGGESTION_FIELDS = ("type", "where", "box", "severity", "fix")
 
 
-def suggest(path, prompt, critic=None, key=None, request=None):
+def suggest(path, prompt, critic=None, key=None, request=None, model=None):
     """Judge path once, for the studio's critic suggestions: never calls a
     generator and never builds an escalation. Returns {"defects": [...],
-    "cost": float|None, "critic": id}, each defect keeping only
-    SUGGESTION_FIELDS plus a stable id "d1", "d2", ... in the critic's
-    order. Raises like run()."""
-    check_judgeable(path)
+    "summary": str, "model_trouble": bool, "cost": float|None, "critic": id},
+    each defect keeping only SUGGESTION_FIELDS plus a stable id "d1", "d2",
+    ... in the critic's order. summary and model_trouble come from the same
+    critic call as the defects (suggest_judge's extended schema). model is
+    the round's own generator model id, when known: when model_trouble is
+    true, "models" (model_options(), excluding model) is added too; a
+    failed ranking never fails suggest() itself, setting "models_error"
+    instead. Raises like run()."""
+    kind = check_judgeable(path)
     critic = critic or os.environ.get("CLOUTER_CRITIC") or DEFAULT_CRITIC
     if key is None:
         key = keys.get("OPENROUTER_API_KEY")  # raises MissingKey/UnsafeFile
-    result = judge(path, prompt, critic, key, request)
+    result = suggest_judge(path, prompt, critic, key, request)
     defects = [dict({"id": f"d{i + 1}"}, **{k: d.get(k) for k in SUGGESTION_FIELDS})
                for i, d in enumerate(result["defects"])]
-    return {"defects": defects, "cost": result["cost"], "critic": critic}
+    out = {"defects": defects, "summary": result["summary"], "model_trouble": result["model_trouble"],
+           "cost": result["cost"], "critic": critic}
+    if result["model_trouble"]:
+        try:
+            out["models"] = model_options(kind, prompt, request=request, defects=defects,
+                                          exclude={model} if model else (), key=key)
+        except Exception as e:  # noqa: BLE001 - a failed ranking must never fail suggest()
+            out["models_error"] = f"{type(e).__name__}: {e}"
+    return out
 
 
 # --- studio: translating the user's annotations into generator instructions --------
@@ -792,18 +910,24 @@ def _write_out(path, obj):
 def main(argv):
     parser = argparse.ArgumentParser(
         description="Judge a generated image with a vision-model critic, and fix defects it finds.")
-    parser.add_argument("file")
+    parser.add_argument("file", nargs="?", help="the image or SVG to judge (not used with --models)")
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument("--suggest", action="store_true",
                             help="judge once and write the defects, with ids, to --out (no fix rounds)")
     mode_group.add_argument("--translate", action="store_true",
                             help="turn studio annotations on <file> into generator instructions in --out")
-    parser.add_argument("--out", help="--suggest/--translate: path of the JSON file to write")
+    mode_group.add_argument("--models", action="store_true",
+                            help="rank alternative generator models for --modality into --out (no judging)")
+    parser.add_argument("--out", help="--suggest/--translate/--models: path of the JSON file to write")
     prompt_group = parser.add_mutually_exclusive_group()
     prompt_group.add_argument("--prompt", help="the original generation prompt")
     prompt_group.add_argument("--prompt-file", help="path to a file holding the prompt text")
-    parser.add_argument("--model", help="the generator model id (for fix rounds; required unless "
-                        "--suggest or --translate)")
+    parser.add_argument("--model", help="the generator model id (for fix rounds, required unless "
+                        "--translate or --models; optional for --suggest, to exclude it from "
+                        "\"models\" when model_trouble is true)")
+    parser.add_argument("--modality", choices=catalogue.MODALITIES,
+                        help="--models: the modality to rank alternatives for")
+    parser.add_argument("--exclude", help="--models: comma-separated model ids to leave out")
     parser.add_argument("--rounds", type=int, default=2, help="max fix rounds (0: judge only, default 2)")
     parser.add_argument("--critic", help="critic model id (default CLOUTER_CRITIC, else the built-in default)")
     parser.add_argument("--aspect", help="aspect ratio such as 16:9, for a fix regeneration")
@@ -823,12 +947,31 @@ def main(argv):
     request_group.add_argument("--request-file", help="path to a file holding the user's original "
                                 "request, verbatim")
     args = parser.parse_args(argv[1:])
-    if (args.suggest or args.translate) and not args.out:
-        parser.error("--out is required with --suggest and --translate")
-    if not args.suggest and not args.translate and not args.model:
+    if (args.suggest or args.translate or args.models) and not args.out:
+        parser.error("--out is required with --suggest, --translate and --models")
+    if not args.suggest and not args.translate and not args.models and not args.model:
         parser.error("the following arguments are required: --model")
+    if not args.models and not args.file:
+        parser.error("the following arguments are required: file")
     if args.request_file:
         args.request = generate.read_text_arg(args.request_file, parser, "request-file")
+
+    if args.models:
+        if not args.modality:
+            parser.error("--modality is required with --models")
+        exclude = [e.strip() for e in args.exclude.split(",") if e.strip()] if args.exclude else []
+        defects = None
+        if args.defects_file:
+            defects = _read_json_arg(args.defects_file, parser, "defects-file", "defects")
+        if not args.prompt and not args.prompt_file:
+            parser.error("one of the arguments --prompt --prompt-file is required")
+        if args.prompt_file:
+            args.prompt = generate.read_text_arg(args.prompt_file, parser, "prompt-file")
+        if not args.prompt.strip():
+            parser.error("--prompt must not be empty")
+        return _cli_call(lambda: {"models": model_options(
+            args.modality, args.prompt, request=args.request, defects=defects, exclude=exclude)},
+            args.out, ("models",))
 
     if args.translate:
         notes = _read_json_arg(args.notes_file, parser, "notes-file", "notes") if args.notes_file else []
@@ -850,7 +993,8 @@ def main(argv):
 
     if args.suggest:
         return _cli_call(lambda: suggest(args.file, args.prompt, critic=args.critic,
-                                         request=args.request), args.out, ("defects",))
+                                         request=args.request, model=args.model), args.out,
+                         ("defects", "summary", "model_trouble", "models", "models_error"))
 
     initial_defects = None
     if args.defects_file:
@@ -865,8 +1009,9 @@ def main(argv):
 
 def _cli_call(call, out=None, out_keys=()):
     """Run call() and map its exceptions to exit codes. With out, the
-    result's out_keys are written there and stdout gets {"out", "cost",
-    "critic"}; without, the whole result goes to stdout."""
+    result's present out_keys are written there and stdout gets {"out",
+    "cost", "critic"} (critic omitted when call() didn't return one, as
+    --models doesn't); without, the whole result goes to stdout."""
     try:
         result = call()
     except ValueError as e:
@@ -875,7 +1020,7 @@ def _cli_call(call, out=None, out_keys=()):
     except (keys.MissingKey, keys.UnsafeFile) as e:
         print(f"critique: {e}", file=sys.stderr)
         return 3
-    except (generate.ApiError, catalogue.CatalogueError) as e:
+    except (generate.ApiError, catalogue.CatalogueError, jev.JevError) as e:
         print(f"critique: {e}", file=sys.stderr)
         return 4
     except CritiqueParseError as e:
@@ -886,11 +1031,14 @@ def _cli_call(call, out=None, out_keys=()):
         print(json.dumps(result))
         return 0
     try:
-        _write_out(out, {k: result[k] for k in out_keys})
+        _write_out(out, {k: result[k] for k in out_keys if k in result})
     except OSError as e:
         print(f"critique: cannot write --out {out}: {e}", file=sys.stderr)
         return 2
-    print(json.dumps({"out": out, "cost": result["cost"], "critic": result["critic"]}))
+    printed = {"out": out, "cost": result.get("cost")}
+    if "critic" in result:
+        printed["critic"] = result["critic"]
+    print(json.dumps(printed))
     return 0
 
 

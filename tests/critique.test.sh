@@ -53,6 +53,9 @@ def critic_answer(model):
         return False, [{"type": "text_content", "where": "title", "box": [0.1, 0.1, 0.5, 0.2], "severity": 4,
                         "fix": "spell the title right", "extra": "dropped"},
                        {"type": "spacing", "where": "icons", "box": None, "severity": 2, "fix": "even the gaps"}]
+    if model == "acme/critic-suggest-trouble":
+        return False, [{"type": "prompt_adherence", "where": "missing element", "box": None, "severity": 5,
+                        "fix": "add the missing element"}]
     raise ValueError(f"stand-in: no script for critic model {model}")
 
 
@@ -127,7 +130,7 @@ class Handler(BaseHTTPRequestHandler):
             # cheapest-first order rank_models hands back.
             sort_probs = {"acme/gen-sort-a": 0.01, "acme/gen-sort-b": 0.66,
                           "acme/gen-sort-c": 0.0, "acme/gen-sort-d": 0.33, "acme/gen-sort-e": 0.0}
-            if set(ids) & set(sort_probs):
+            if set(ids) == set(sort_probs):
                 pick = "acme/gen-sort-b"
                 conf = sort_probs[pick]
                 probs = {i: sort_probs.get(i, 0.0) for i in ids}
@@ -154,6 +157,20 @@ class Handler(BaseHTTPRequestHandler):
                 content = json.dumps({"pass": True, "defects": []})
                 self.send_json(200, {"choices": [{"message": {"role": "assistant", "content": content}}],
                                      "usage": {"cost": 0.001}}); return
+            if model == "acme/critic-suggest-explicit-false":
+                content = json.dumps({"pass": False, "summary": "The fox looks right overall.",
+                                      "model_trouble": False,
+                                      "defects": [{"type": "prompt_adherence", "where": "tail", "box": None,
+                                                   "severity": 5, "fix": "add the tail"}]})
+                self.send_json(200, {"choices": [{"message": {"role": "assistant", "content": content}}],
+                                     "usage": {"cost": 0.002}}); return
+            if model == "acme/critic-suggest-explicit-true":
+                content = json.dumps({"pass": False, "summary": "Small spacing issue, otherwise fine.",
+                                      "model_trouble": True,
+                                      "defects": [{"type": "spacing", "where": "icons", "box": None,
+                                                   "severity": 2, "fix": "even the gaps"}]})
+                self.send_json(200, {"choices": [{"message": {"role": "assistant", "content": content}}],
+                                     "usage": {"cost": 0.002}}); return
             if model == "acme/critic-translate":
                 content = json.dumps({"instructions": [
                     {"where": "the sky", "box": [0, 0, 1, 0.3], "instruction": "make the sky darker", "source": "pen"},
@@ -499,9 +516,15 @@ check_eq "--suggest: stdout names the critic" "$(field .critic)" "acme/critic-su
 check_eq "--suggest: ids d1, d2 in order" "$(jq -r '.defects | map(.id) | join(",")' "$work/suggest/defects.json")" "d1,d2"
 check_eq "--suggest: fields kept" "$(jq -c '.defects[0]' "$work/suggest/defects.json")" \
   '{"id":"d1","type":"text_content","where":"title","box":[0.1,0.1,0.5,0.2],"severity":4,"fix":"spell the title right"}'
-check_eq "--suggest: file holds only defects" "$(jq -c 'keys' "$work/suggest/defects.json")" '["defects"]'
+check_eq "--suggest: file holds defects, summary, model_trouble, no models (not in trouble)" \
+  "$(jq -c 'keys' "$work/suggest/defects.json")" '["defects","model_trouble","summary"]'
+check_eq "--suggest: summary empty when the critic didn't give one" "$(jq -r '.summary' "$work/suggest/defects.json")" ""
+check_eq "--suggest: model_trouble false (no severe prompt_adherence defect)" \
+  "$(jq -r '.model_trouble' "$work/suggest/defects.json")" "false"
 check_eq "--suggest: exactly one request, the critic" "$(wc -l < "$work/requests.jsonl" | tr -d ' ')" "1"
 check_eq "--suggest: no generator request" "$(jq -c 'select(.body.messages[0].role != "system")' "$work/requests.jsonl" | wc -l | tr -d ' ')" "0"
+check_eq "--suggest: the critic call asks for summary and model_trouble" \
+  "$(jq -c 'select(.body.model=="acme/critic-suggest")' "$work/requests.jsonl" | jq -r '.body.messages[0].content' | grep -c '"model_trouble"')" "1"
 
 run original.png --prompt "A red fox" --suggest --critic acme/critic-suggest
 check_code "--suggest without --out: exit 2" "$code" 2
@@ -509,6 +532,72 @@ run original.png --suggest --critic acme/critic-suggest --out "$work/x.json"
 check_code "--suggest without a prompt: exit 2" "$code" 2
 run original.png --prompt "A red fox" --critic acme/critic-pass
 check_code "judge mode still requires --model: exit 2" "$code" 2
+
+# --- --suggest: model_trouble derived from a severe prompt_adherence defect, models offered ---
+run original.png --prompt "A red fox" --suggest --critic acme/critic-suggest-trouble --model acme/gen \
+  --out "$work/suggest-trouble/defects.json"
+check_code "--suggest, derived model_trouble: exit 0" "$code" 0
+check_eq "--suggest, derived model_trouble: true" "$(jq -r '.model_trouble' "$work/suggest-trouble/defects.json")" "true"
+check_eq "--suggest, derived model_trouble: models present" \
+  "$(jq 'has("models")' "$work/suggest-trouble/defects.json")" "true"
+check_eq "--suggest, derived model_trouble: at least one, at most 4 models" \
+  "$(jq '.models | length >= 1 and length <= 4' "$work/suggest-trouble/defects.json")" "true"
+check_eq "--suggest, derived model_trouble: --model excluded from the offered models" \
+  "$(jq -r '.models | map(.id) | index("acme/gen")' "$work/suggest-trouble/defects.json")" "null"
+check_eq "--suggest, derived model_trouble: recommended (Jev's pick) is first" \
+  "$(jq -r '.models[0].id' "$work/suggest-trouble/defects.json")" "acme/gen-best"
+check_eq "--suggest, derived model_trouble: each option carries reference_supported" \
+  "$(jq -c '.models | map(has("reference_supported")) | unique' "$work/suggest-trouble/defects.json")" "[true]"
+
+# --- --suggest: the critic's own explicit model_trouble overrides the derived one -----------
+run original.png --prompt "A red fox" --suggest --critic acme/critic-suggest-explicit-false --model acme/gen \
+  --out "$work/suggest-false/defects.json"
+check_code "--suggest, explicit false overrides a severe defect: exit 0" "$code" 0
+check_eq "--suggest, explicit false overrides a severe defect: model_trouble false" \
+  "$(jq -r '.model_trouble' "$work/suggest-false/defects.json")" "false"
+check_eq "--suggest, explicit false overrides a severe defect: summary carried through" \
+  "$(jq -r '.summary' "$work/suggest-false/defects.json")" "The fox looks right overall."
+check_eq "--suggest, explicit false overrides a severe defect: no models key" \
+  "$(jq 'has("models")' "$work/suggest-false/defects.json")" "false"
+
+run original.png --prompt "A red fox" --suggest --critic acme/critic-suggest-explicit-true --model acme/gen \
+  --out "$work/suggest-true/defects.json"
+check_code "--suggest, explicit true with mild defects: exit 0" "$code" 0
+check_eq "--suggest, explicit true with mild defects: model_trouble true" \
+  "$(jq -r '.model_trouble' "$work/suggest-true/defects.json")" "true"
+check_eq "--suggest, explicit true with mild defects: summary carried through" \
+  "$(jq -r '.summary' "$work/suggest-true/defects.json")" "Small spacing issue, otherwise fine."
+
+# --- --suggest: a ranking failure (no candidates for this modality) sets models_error, exit 0 --
+run shape.svg --prompt "A rectangle" --suggest --critic acme/critic-suggest-trouble --model acme/gen \
+  --out "$work/suggest-error/defects.json"
+check_code "--suggest, ranking failure: exit 0 (must not fail suggest)" "$code" 0
+check_eq "--suggest, ranking failure: model_trouble still true" \
+  "$(jq -r '.model_trouble' "$work/suggest-error/defects.json")" "true"
+check_eq "--suggest, ranking failure: no models key" "$(jq 'has("models")' "$work/suggest-error/defects.json")" "false"
+check_eq "--suggest, ranking failure: models_error present" \
+  "$(jq 'has("models_error")' "$work/suggest-error/defects.json")" "true"
+check_eq "--suggest, ranking failure: models_error names the ValueError" \
+  "$(jq -r '.models_error' "$work/suggest-error/defects.json" | grep -c ValueError)" "1"
+
+# --- --models: CLI-only ranking, honouring --exclude, no <file>, no critic call ------------
+exclude_list="acme/gen,acme/gen-noref,acme/gen-better,acme/gen-extra,acme/gen-noimage-hi,acme/gen-sort,acme/gen-sort-a,acme/gen-sort-b,acme/gen-sort-c,acme/gen-sort-d,acme/gen-sort-e"
+run --models --modality raster_image --prompt "A red fox" --exclude "$exclude_list" --out "$work/models-cli.json"
+check_code "--models: exit 0" "$code" 0
+check_eq "--models: stdout names the out file" "$(field .out)" "$work/models-cli.json"
+check_eq "--models: stdout has no critic key" "$(field 'has("critic")')" "false"
+check_eq "--models: file holds only models" "$(jq -c 'keys' "$work/models-cli.json")" '["models"]'
+check_eq "--models: excluded ids left out" \
+  "$(jq -r '.models | map(.id) | join(",")' "$work/models-cli.json" | grep -Ec 'acme/gen(,|$)|acme/gen-noref')" "0"
+check_eq "--models: remaining two candidates offered, recommended (best) first" \
+  "$(jq -r '.models | map(.id) | join(",")' "$work/models-cli.json")" "acme/gen-best,acme/gen-cheap"
+check_eq "--models: no critic call, only the decisions call" \
+  "$(jq -c 'select(.path=="/api/v1/chat/completions")' "$work/requests.jsonl" | wc -l | tr -d ' ')" "0"
+
+run --models --prompt "A red fox" --out "$work/models-nomodality.json"
+check_code "--models without --modality: exit 2" "$code" 2
+run --models --modality raster_image --out "$work/models-noprompt.json"
+check_code "--models without a prompt: exit 2" "$code" 2
 
 # --- --translate: clean image + composite + notes + text -> instructions ------------
 python3 - "$ROOT" <<'EOF_PNG'

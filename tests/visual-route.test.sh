@@ -146,8 +146,8 @@ check_eq "svg prompt: names generate.py with modality" "$(ctx | grep -c 'generat
 check_eq "svg prompt: generate.py runs with --no-critique" "$(ctx | grep -c -- '--no-critique')" "1"
 check_eq "svg prompt: names studio.py push" "$(ctx | grep -c 'studio.py" push')" "1"
 check_eq "svg prompt: names studio.py wait" "$(ctx | grep -c 'studio.py wait --session')" "1"
-check_eq "svg prompt: suggests defects before pushing (vector)" "$(ctx | grep -c -- '--suggest --out <defects.json>')" "1"
-check_eq "svg prompt: push carries --defects-file (vector)" "$(ctx | grep -c -- '--defects-file <defects.json>')" "1"
+check_eq "svg prompt: suggests defects before pushing (vector)" "$(ctx | grep -c -- '--suggest --model <chosen id> --out <defects.json>')" "1"
+check_eq "svg prompt: push carries --defects-file (vector)" "$(ctx | grep -c -- '--defects-file <defects.json> \[--message-file <note>\]')" "1"
 check_eq "svg prompt: points at the Studio loop in SKILL.md" "$(ctx | grep -c 'Studio loop.*SKILL.md')" "1"
 check_eq "svg prompt: command carries --request-file" "$(ctx | grep -c -- '--request-file')" "1"
 req_file="$(ctx | grep -o -- '--request-file [^ ]*' | head -n1 | cut -d' ' -f2)"
@@ -216,7 +216,7 @@ check_eq "transparent PNG prompt: only the alpha model listed" "$(ctx | grep -o 
 check_eq "transparent PNG prompt: command carries --transparent" "$(ctx | grep -c -- '--modality raster_image --prompt-file <path to the design brief> --transparent')" "1"
 check_eq "transparent PNG prompt: names studio.py push" "$(ctx | grep -c 'studio.py" push')" "1"
 check_eq "transparent PNG prompt: names studio.py wait" "$(ctx | grep -c 'studio.py wait --session')" "1"
-check_eq "transparent PNG prompt: suggests defects before pushing (raster)" "$(ctx | grep -c -- '--suggest --out <defects.json>')" "1"
+check_eq "transparent PNG prompt: suggests defects before pushing (raster)" "$(ctx | grep -c -- '--suggest --model <chosen id> --out <defects.json>')" "1"
 
 run "Wordy: explain which logo image format suits a letterhead"
 check_code "text_or_code majority: exit 0" "$code" 0

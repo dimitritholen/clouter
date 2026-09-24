@@ -37,6 +37,10 @@
       <p id="brief-text"></p>
     </details>
 
+    <section id="messages-section" class="messages-section" hidden>
+      <div id="messages-list" class="messages-list"></div>
+    </section>
+
     <section id="defects-section" class="defects-section" hidden>
       <h2>Critic suggestions</h2>
       <ul id="defects-list" class="defects-list"></ul>
@@ -50,6 +54,16 @@
     <div id="timeline-mount" class="timeline-mount"></div>
 
     <section class="feedback-section">
+      <fieldset id="model-picker" class="model-picker">
+        <legend>Model for next round</legend>
+        <div id="model-options-list" class="model-options-list"></div>
+        <div class="model-picker-actions">
+          <button id="model-suggest-btn" type="button" class="btn">Suggest other models</button>
+          <span id="model-suggest-status" class="model-suggest-status" hidden></span>
+          <button id="model-manual-btn" type="button" class="btn">Manually pick a model…</button>
+        </div>
+      </fieldset>
+
       <label for="feedback-text">Feedback</label>
       <textarea id="feedback-text" rows="4" placeholder="What should change?"></textarea>
 
@@ -66,6 +80,16 @@
     </section>
   </section>
 </main>
+
+<dialog id="manual-model-dialog" class="manual-model-dialog">
+  <div class="manual-model-header">
+    <h2>Pick a model</h2>
+    <button id="manual-model-close" type="button" class="btn" aria-label="Close">Close</button>
+  </div>
+  <label for="manual-model-search" class="sr-only">Search models</label>
+  <input id="manual-model-search" type="text" placeholder="Search by name or id…" autocomplete="off">
+  <div id="manual-model-list" class="manual-model-list" aria-label="Catalogue models"></div>
+</dialog>
 
 <script src="/static/app.js"></script>
 <script src="/static/editor.js" defer></script>

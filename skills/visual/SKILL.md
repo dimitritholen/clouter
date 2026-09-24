@@ -177,8 +177,12 @@ For raster_image/vector_svg only, also run:
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/skills/visual/critique.py" <path> \
-  --prompt-file <brief> --suggest --out <defects.json>
+  --prompt-file <brief> --suggest --model <generator id> --out <defects.json>
 ```
+
+This writes `defects`, `summary`, `model_trouble`, and (when model_trouble is
+true) a Jev-ranked `models` list to the defects file, excluding the current
+generator.
 
 Then push and wait, in the background:
 
@@ -186,10 +190,14 @@ Then push and wait, in the background:
 python3 "${CLAUDE_PLUGIN_ROOT}/skills/visual/studio.py" push \
   --file <path> --model <chosen id> --cost <cost> --brief-file <brief> \
   --request-file <path to the user's request> --modality <modality> \
-  [--defects-file <defects.json>]
+  [--defects-file <defects.json>] [--message-file <note.txt>]
 # prints {"round", "url", "session"} — tell the user the url once
 python3 "${CLAUDE_PLUGIN_ROOT}/skills/visual/studio.py" wait --session <session dir>
 ```
+
+`--message-file <path>` is an optional Claude note for this round (plain text),
+shown in the page as a "Claude" message to explain what changed since the last
+round.
 
 `--cost` here is that round's `generate.py` cost only — a `critique.py
 --translate` or `--suggest` call has its own `cost` and does not go into
@@ -201,10 +209,13 @@ returns on feedback, accept, its own timeout or a dead server) and handle
 its exit code:
 
 - **0, feedback.** Its JSON (`annotation`, `notes`, `markers[].frame`,
-  `text`, `accepted_defects`, `branch_from`, `round`, `round_file`) is one
-  feedback entry. When `annotation`, `notes` or any `markers[].frame` is
-  present, translate them first — write `notes`/`markers`/`text` each to
-  their own temp file and run:
+  `text`, `accepted_defects`, `branch_from`, `round`, `round_file`, `model`)
+  is one feedback entry. `model` (when present) is the model id the user
+  picked in the page — use it for the next round without asking; still run
+  the spec check and `catalogue.py --reference-supported <id>` as usual.
+  When `annotation`, `notes` or any `markers[].frame` is present, translate
+  them first — write `notes`/`markers`/`text` each to their own temp file
+  and run:
 
   ```bash
   python3 "${CLAUDE_PLUGIN_ROOT}/skills/visual/critique.py" <round_file> \

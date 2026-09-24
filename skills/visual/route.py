@@ -137,11 +137,11 @@ def context(prompt, picks, transparent=False, request_path=None):
         not here."""
         visual = modality in ("raster_image", "vector_svg")
         suggest = (f"; python3 \"{critique}\" <file> --prompt-file <path to the design brief> "
-                   "--suggest --out <defects.json>") if visual else ""
+                   "--suggest --model <chosen id> --out <defects.json>") if visual else ""
         defects = " --defects-file <defects.json>" if visual else ""
         push = (f"python3 \"{studio}\" push --file <file> --model <chosen id> --cost <cost> "
                 f"--brief-file <path to the design brief> --request-file <path> "
-                f"--modality {modality}{defects}")
+                f"--modality {modality}{defects} [--message-file <note>]")
         return (f"{suggest}; then {push}; then `studio.py wait --session <dir>` in the "
                 "background and follow the \"Studio loop\" section of SKILL.md")
 
@@ -149,10 +149,10 @@ def context(prompt, picks, transparent=False, request_path=None):
         """Same tail as studio_steps(), worded for the multi-format block where the
         modality varies per question rather than being known up front."""
         return (f"; for raster_image/vector_svg formats also run python3 \"{critique}\" "
-                "<file> --prompt-file <brief> --suggest --out <defects.json>; then run "
+                "<file> --prompt-file <brief> --suggest --model <chosen id> --out <defects.json>; then run "
                 f"python3 \"{studio}\" push --file <file> --model <chosen id> --cost <cost> "
                 "--brief-file <brief> --request-file <path> --modality <its --modality> "
-                "(--defects-file <defects.json> for raster/vector); then run `studio.py wait "
+                "(--defects-file <defects.json> for raster/vector) [--message-file <note>]; then run `studio.py wait "
                 "--session <dir>` per push in the background and follow the \"Studio loop\" "
                 "section of SKILL.md")
 
