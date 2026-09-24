@@ -1,0 +1,89 @@
+# OpenRouter APIs — Recraft: Recraft V4 Vector (recraft/recraft-v4-vector)
+
+Guide for calling every confirmed OpenRouter API that serves `recraft/recraft-v4-vector`.
+
+Model page: https://openrouter.ai/recraft/recraft-v4-vector
+Create an API key: https://openrouter.ai/settings/keys
+
+## Authentication
+
+Send this header with every request:
+
+- Authorization: Bearer $OPENROUTER_API_KEY
+
+## Image API
+
+Generate images with `recraft/recraft-v4-vector` through OpenRouter's Image API.
+
+Docs: https://openrouter.ai/docs/guides/overview/multimodal/image-generation
+Model discovery API: https://openrouter.ai/api/v1/images/models
+Endpoints (recraft/recraft-v4-vector-20260514): https://openrouter.ai/api/v1/images/models/recraft/recraft-v4-vector-20260514/endpoints
+
+### Endpoint
+
+POST https://openrouter.ai/api/v1/images
+
+Headers:
+- Content-Type: application/json
+
+### Request fields (recraft/recraft-v4-vector)
+
+- model: string (required) — `"recraft/recraft-v4-vector"`
+- prompt: string (required) — text description of the desired image
+- aspect_ratio: "1:1" | "4:3" | "3:4" | "16:9" | "9:16" | "auto" (optional) — aspect ratio of the generated image
+- output_format: "svg" (optional) — encoding of the returned image bytes
+- n: integer 1-6 (optional) — upper bound on the number of images to generate; providers may return fewer, and single-image providers reject n > 1
+- input_references: array of up to 1 image references (optional) — reference images for image-to-image, as `{ "type": "image_url", "image_url": { "url": "…" } }` entries; the url is an https URL or a base64 data URL
+
+These are the generation parameters this model accepts between its providers; an
+unlisted value is rejected, and a listed one can still be refused by whichever provider
+serves the call. `provider` (routing preferences) is accepted on every request.
+
+### Response
+
+```json
+{
+  "created": 1748372400,
+  "data": [{ "b64_json": "<base64 image bytes>", "media_type": "image/png" }],
+  "usage": { "prompt_tokens": 0, "completion_tokens": 4175, "total_tokens": 4175, "cost": 0.04 }
+}
+```
+
+Base64-decode `data[i].b64_json` and write the bytes to a file; `media_type` gives the extension.
+`usage.cost` is the USD charge for the call.
+
+### Examples
+
+#### Text to Image
+
+```bash
+curl -X POST https://openrouter.ai/api/v1/images \
+  -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "model": "recraft/recraft-v4-vector",
+  "prompt": "Circular die-cut sticker badge with a simple open-door icon and the text “OpenRouter”, thick outline, flat pastel fill, high contrast, transparent/no background treatment, cartoon-vector style.",
+  "n": 1,
+  "aspect_ratio": "1:1"
+}'
+```
+
+### Error differences
+
+- 413 — request body too large
+
+## Errors
+
+Failures return `{"error": {"code": <number>, "message": <string>}}` with the HTTP status:
+
+- 400 — malformed request or an unsupported parameter
+- 401 — missing or invalid API key
+- 402 — insufficient credits
+- 403 — spend limit reached, key disabled, or access blocked
+- 404 — unknown model or no provider can serve the request
+- 429 — rate limited; retry with backoff
+- 502 — the operation failed upstream; failed generations are not billed
+
+---
+
+Canonical version of this document: https://openrouter.ai/recraft/recraft-v4-vector/llms.txt

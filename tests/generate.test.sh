@@ -15,7 +15,8 @@ python3 - "$work" "$ROOT" <<'EOF_SERVER' &
 import base64, json, sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 work = sys.argv[1]
-sys.path.insert(0, sys.argv[2])
+ROOT = sys.argv[2]
+sys.path.insert(0, ROOT)
 from lib import png
 PNG = base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==")
 SVG = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10"><circle cx="5" cy="5" r="4"/></svg>'
@@ -94,6 +95,19 @@ class Handler(BaseHTTPRequestHandler):
         return f"http://127.0.0.1:{self.server.server_port}"
 
     def do_GET(self):
+        # llms.txt (spec.py) fetches are plumbing, not a generation call:
+        # kept out of requests.jsonl so every existing request-sequence
+        # assertion below still reads as the generation calls alone. Every
+        # test model other than the two below has no spec (a 404 here),
+        # exercising generate.py's own fallback.
+        if self.path.endswith("/llms.txt"):
+            if self.path == "/google/veo-3.1/llms.txt":
+                out = open(f"{ROOT}/tests/fixtures/llms/google__veo-3.1.txt", "rb").read()
+                self.send(200, out, "text/plain"); return
+            if self.path == "/recraft/recraft-v4-vector/llms.txt":
+                out = open(f"{ROOT}/tests/fixtures/llms/recraft__recraft-v4-vector.txt", "rb").read()
+                self.send(200, out, "text/plain"); return
+            self.send_response(404); self.end_headers(); return
         self.record()
         if self.path.startswith("/api/v1/videos/") and self.path.endswith("/content?index=0"):
             self.send(200, MP4, "video/mp4"); return
@@ -666,5 +680,63 @@ check_eq "--request-file: critic call carries the request text" "$(printf '%s' "
 
 run --model acme/paint --modality raster_image --prompt "A fox, both request flags" --request "$REQUEST_TEXT" --request-file "$work/request.txt"
 check_code "--request and --request-file together: exit 2" "$code" 2
+
+# --- --param and the per-model request spec (spec.py) ---
+
+run --model google/veo-3.1 --modality video --prompt "Test clip" --duration 5
+check_code "spec: --duration outside the enum is refused, usage exit" "$code" 2
+check_eq "spec: bad --duration names the allowed values" "$(grep -c 'duration must be one of: 4, 6, 8' "$work/stderr")" "1"
+check_eq "spec: bad --duration sends no generation request" "$(grep -c '\"/api/v1/videos\"' "$work/requests.jsonl" 2>/dev/null || echo 0)" "0"
+
+run --model google/veo-3.1 --modality video --prompt "Test clip" --param resolution=1080p --param generate_audio=true
+check_code "spec: --param resolution/generate_audio on veo: written" "$code" 0
+check_eq "spec: --param values reach the veo request body with the spec's types" \
+  "$(jq -c 'select(.path=="/api/v1/videos") | [.body.resolution, .body.generate_audio]' "$work/requests.jsonl")" '["1080p",true]'
+
+run --model recraft/recraft-v4-vector --modality vector_svg --prompt "Fox logo" --aspect 1:1 --endpoint images
+check_eq "spec bug fix: aspect_ratio is top-level on /api/v1/images, not image_config" \
+  "$(jq -c 'select(.path=="/api/v1/images") | [.body.aspect_ratio, (.body | has("image_config"))]' "$work/requests.jsonl")" '["1:1",false]'
+
+run --model google/veo-3.1 --modality video --prompt "Test clip" --param bogus_field=1
+check_code "spec: unknown --param key refused, usage exit" "$code" 2
+check_eq "spec: unknown --param names the key" "$(grep -c 'unknown --param bogus_field' "$work/stderr")" "1"
+check_eq "spec: unknown --param sends no generation request" "$(grep -c '\"/api/v1/videos\"' "$work/requests.jsonl" 2>/dev/null || echo 0)" "0"
+
+run --model acme/paint --modality raster_image --prompt "A fox, no spec for this model"
+check_code "spec: model with no request spec (404) still generates" "$code" 0
+check_eq "spec: 404 spec fetch is a stderr warning, not a failure" "$(grep -c 'no request spec for acme/paint' "$work/stderr")" "1"
+check_eq "spec: generation request still went out" "$(grep -c '/api/v1/chat/completions' "$work/requests.jsonl")" "1"
+
+# --- --endpoint auto with an images-only spec (recraft-v4-vector has no
+# chat/completions section): auto must target /api/v1/images directly,
+# never waste a call on a guaranteed chat/completions 404 ---
+run --model recraft/recraft-v4-vector --modality vector_svg --prompt "Fox logo, auto endpoint" --aspect 1:1
+check_eq "spec: images-only auto never calls chat/completions" "$(grep -c '/api/v1/chat/completions' "$work/requests.jsonl" 2>/dev/null)" "0"
+check_eq "spec: images-only auto goes straight to /api/v1/images with aspect_ratio top-level" \
+  "$(jq -c 'select(.path=="/api/v1/images") | [.body.aspect_ratio, (.body | has("image_config"))]' "$work/requests.jsonl")" '["1:1",false]'
+
+run --model recraft/recraft-v4-vector --modality vector_svg --prompt "Fox logo, bad aspect" --aspect 21:9
+check_code "spec: images-only auto still validates aspect_ratio's enum, usage exit" "$code" 2
+check_eq "spec: bad aspect names the allowed values" "$(grep -c 'aspect_ratio must be one of' "$work/stderr")" "1"
+check_eq "spec: bad aspect on images-only auto sends no request at all" \
+  "$([ -f "$work/requests.jsonl" ] && wc -l < "$work/requests.jsonl" || echo 0)" "0"
+
+# --- --param cannot override a field generate.py already owns ---
+run --model google/veo-3.1 --modality video --prompt "Test clip" --param model=hijacked
+check_code "spec: --param cannot override an always-supplied field, usage exit" "$code" 2
+check_eq "spec: refusal names the field" "$(grep -c 'param model is sent automatically' "$work/stderr")" "1"
+run --model google/veo-3.1 --modality video --prompt "Test clip" --param aspect_ratio=16:9
+check_code "spec: --param cannot override a flag-owned field, usage exit" "$code" 2
+check_eq "spec: refusal points to --aspect" "$(grep -c 'param aspect_ratio is set by --aspect' "$work/stderr")" "1"
+
+# --- critique fix rounds resend the same --param and endpoint as round 1 ---
+# acme/critic-always-fail always fails, independent of any earlier test's
+# call count on that model, so the fix round is guaranteed to fire.
+CLOUTER_CRITIQUE=1 run --model acme/paint --modality raster_image --prompt "A fox, param persists across fix rounds" \
+  --critic acme/critic-always-fail --rounds 1 --param seed=7
+check_code "spec: --param survives into the critique fix round: exit 0" "$code" 0
+check_eq "spec: one fix round happened" "$(field .critique.rounds)" "1"
+check_eq "spec: --param reached both the original and the fix-round generation body" \
+  "$(jq -r 'select(.body.model=="acme/paint") | .body.seed' "$work/requests.jsonl" | tr '\n' ';')" "7;7;"
 
 exit $fail

@@ -1,0 +1,115 @@
+# OpenRouter APIs — Google: Veo 3.1 (google/veo-3.1)
+
+Guide for calling every confirmed OpenRouter API that serves `google/veo-3.1`.
+
+Model page: https://openrouter.ai/google/veo-3.1
+Create an API key: https://openrouter.ai/settings/keys
+
+## Authentication
+
+Send this header with every request:
+
+- Authorization: Bearer $OPENROUTER_API_KEY
+
+## Video API
+
+Generate videos with `google/veo-3.1` through OpenRouter's Video API.
+
+Docs: https://openrouter.ai/docs/guides/overview/multimodal/video-generation
+Model discovery API: https://openrouter.ai/api/v1/videos/models
+
+### Endpoint
+
+POST https://openrouter.ai/api/v1/videos
+
+Headers:
+- Content-Type: application/json
+
+Generation is asynchronous: the submit call returns a job, which is polled until it
+finishes. The finished video is downloaded from the job, not returned inline.
+
+### Request fields (google/veo-3.1)
+
+- model: string (required) — `"google/veo-3.1"`
+- prompt: string (optional when frame_images is set, otherwise required) — text description of the desired video
+- duration: 4 | 6 | 8 (optional) — length of the video in seconds
+- size: "1280x720" | "1080x1920" | "1920x1080" | "720x1280" | "3840x2160" | "2160x3840" (optional) — exact pixel dimensions, as WIDTHxHEIGHT
+- resolution: "720p" | "1080p" | "4K" (optional) — resolution tier; interchangeable with size when paired with aspect_ratio
+- aspect_ratio: "16:9" | "9:16" (optional) — aspect ratio of the generated video
+- frame_images: array of frame references (optional) — images to condition the named frame on, as `{ "type": "image_url", "image_url": { "url": "…" }, "frame_type": "first_frame" }` entries; frame_type is one of "first_frame" | "last_frame", and the url is an https URL or a base64 data URL
+- input_references: array of reference assets (optional) — images to guide the generation, as `{ "type": "image_url", "image_url": { "url": "…" } }` entries
+- generate_audio: boolean (optional) — generate audio alongside the video
+- seed: integer (optional) — sample deterministically; determinism is not guaranteed for every provider
+- callback_url: string (optional) — https URL notified by webhook when the job finishes, instead of polling
+
+These are the generation parameters this model accepts between its providers; an unlisted
+value is rejected, and a listed one can still be refused by whichever provider serves the
+call. `provider` (routing preferences) is accepted on every request.
+
+### Response
+
+The submit call returns `202` with the job:
+
+```json
+{
+  "id": "job-abc123",
+  "generation_id": "gen-xyz789",
+  "polling_url": "/api/v1/videos/job-abc123",
+  "status": "pending"
+}
+```
+
+Poll `GET https://openrouter.ai/api/v1/videos/{id}` with the same Authorization header while `status` is
+`pending` or `in_progress`, and stop once it is `completed`, `failed`, `cancelled`, or
+`expired`:
+
+```json
+{
+  "id": "job-abc123",
+  "status": "completed",
+  "unsigned_urls": ["https://storage.example.com/video.mp4"],
+  "usage": { "cost": 0.5 }
+}
+```
+
+Download the bytes from `GET https://openrouter.ai/api/v1/videos/{id}/content` (`?index=N` selects a clip
+when the job produced more than one). `usage.cost` is the USD charge for the call.
+
+### Examples
+
+#### Text to Video
+
+```bash
+curl -X POST https://openrouter.ai/api/v1/videos \
+  -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+  "model": "google/veo-3.1",
+  "prompt": "a slow cinematic push-in on a glowing neon sign that reads \"OpenRouter\" in the window of a cozy coffee shop on a rainy night, rain streaking down the glass, reflections rippling on wet pavement",
+  "duration": 6
+}'
+```
+
+### Error differences
+
+- 404 also covers an unknown video job
+- 500 — the job could not be submitted
+
+A job that fails after acceptance reports `status: "failed"` with an `error` message rather than
+an HTTP error, since the submit call already succeeded.
+
+## Errors
+
+Failures return `{"error": {"code": <number>, "message": <string>}}` with the HTTP status:
+
+- 400 — malformed request or an unsupported parameter
+- 401 — missing or invalid API key
+- 402 — insufficient credits
+- 403 — spend limit reached, key disabled, or access blocked
+- 404 — unknown model or no provider can serve the request
+- 429 — rate limited; retry with backoff
+- 502 — the operation failed upstream; failed generations are not billed
+
+---
+
+Canonical version of this document: https://openrouter.ai/google/veo-3.1/llms.txt

@@ -12,13 +12,15 @@ does and how to install it.
   `skills/visual/route.py` (timeout 10s).
 - `skills/visual/` — the `visual` skill: `SKILL.md`, `route.py` (the hook),
   `catalogue.py` (live OpenRouter model list), `ranking.py` (Jev calls),
-  `generate.py` (writes the file, logs cost), `critique.py` (vision-model
-  critic and fix rounds), `preview.py` (light/dark contact sheet),
-  `setup-key.py` (one-time OAuth key setup).
+  `spec.py` (fetches and parses a model's request spec from its
+  `llms.txt`), `generate.py` (writes the file, logs cost), `critique.py`
+  (vision-model critic and fix rounds), `preview.py` (light/dark contact
+  sheet), `setup-key.py` (one-time OAuth key setup).
 - `lib/` — shared helpers: `jev.py` (HTTP client for Jev/TypeSafe),
   `keys.py` (credentials file read/write), `png.py` (PNG decode/encode,
   bbox trim).
-- `tests/` — `*.test.sh` cases plus `tests/run-all.sh`.
+- `tests/` — `*.test.sh` cases plus `tests/run-all.sh`; `tests/fixtures/llms/`
+  — sample `llms.txt` fixtures for `spec.py`'s tests.
 
 ## Running tests
 

@@ -1,0 +1,77 @@
+# OpenRouter APIs — Google: Gemini 3.8 Flash TTS (google/gemini-3.8-flash-tts)
+
+Guide for calling every confirmed OpenRouter API that serves `google/gemini-3.8-flash-tts`.
+
+Model page: https://openrouter.ai/google/gemini-3.8-flash-tts
+Create an API key: https://openrouter.ai/settings/keys
+
+## Authentication
+
+Send this header with every request:
+
+- Authorization: Bearer $OPENROUTER_API_KEY
+
+## Text-to-Speech API
+
+Synthesize audio with `google/gemini-3.8-flash-tts` through OpenRouter's Text-to-Speech API.
+
+Docs: https://openrouter.ai/docs/api/api-reference/tts/create-speech
+
+### Endpoint
+
+POST https://openrouter.ai/api/v1/audio/speech
+
+Headers:
+- Content-Type: application/json
+
+### Request fields (google/gemini-3.8-flash-tts)
+
+- model: string (required) — `"google/gemini-3.8-flash-tts"`
+- input: string (required) — text to synthesize
+- voice: "Zephyr" | "Puck" | "Charon" | "Kore" | "Fenrir" | "Leda" | "Orus" | "Aoede" | "Callirrhoe" | "Autonoe" | "Enceladus" | "Iapetus" | "Umbriel" | "Algieba" | "Despina" | "Erinome" | "Algenib" | "Rasalgethi" | "Laomedeia" | "Achernar" | "Alnilam" | "Schedar" | "Gacrux" | "Pulcherrima" | "Achird" | "Zubenelgenubi" | "Vindemiatrix" | "Sadachbia" | "Sadaltager" | "Sulafat" (optional) — provider-specific voice identifier
+- response_format: "mp3" | "pcm" (optional) — output audio encoding; defaults to pcm
+
+### Response
+
+Success returns raw audio bytes, not JSON.
+
+- `Content-Type` identifies the audio encoding, such as `audio/mpeg` or `audio/pcm`.
+- `X-Generation-Id` identifies the billed generation.
+- Write the response body directly to an audio file; do not call `response.json()`.
+
+### Examples
+
+#### Synthesize speech
+
+```bash
+curl https://openrouter.ai/api/v1/audio/speech \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer $OPENROUTER_API_KEY" \
+  --output output.pcm \
+  -d '{
+  "model": "google/gemini-3.8-flash-tts",
+  "input": "Hello! This is a text-to-speech test.",
+  "voice": "Zephyr"
+}'
+```
+
+### Error differences
+
+- 400 — malformed audio input or an audio option the routed provider does not support
+- 502 — the upstream audio operation failed
+
+## Errors
+
+Failures return `{"error": {"code": <number>, "message": <string>}}` with the HTTP status:
+
+- 400 — malformed request or an unsupported parameter
+- 401 — missing or invalid API key
+- 402 — insufficient credits
+- 403 — spend limit reached, key disabled, or access blocked
+- 404 — unknown model or no provider can serve the request
+- 429 — rate limited; retry with backoff
+- 502 — the operation failed upstream; failed generations are not billed
+
+---
+
+Canonical version of this document: https://openrouter.ai/google/gemini-3.8-flash-tts/llms.txt

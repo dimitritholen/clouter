@@ -121,6 +121,7 @@ sys.path.insert(0, HERE)
 from lib import keys, png  # noqa: E402
 import catalogue  # noqa: E402
 import preview  # noqa: E402
+import spec  # noqa: E402
 
 MODALITIES = ("raster_image", "vector_svg", "video", "speech")
 EXTENSIONS = {
@@ -136,6 +137,14 @@ MAX_REFERENCE_BYTES = 20 * 1024 * 1024
 REFERENCE_EXTENSIONS = {
     ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
     ".webp": "image/webp", ".svg": "image/svg+xml",
+}
+# fields generate.py itself always sends on that endpoint, so a spec's
+# "required" on one of these is never a missing-field error.
+ALWAYS_SUPPLIED = {
+    "/api/v1/images": {"model", "prompt"},
+    "/api/v1/chat/completions": {"model", "messages"},
+    "/api/v1/videos": {"model", "prompt"},
+    "/api/v1/audio/speech": {"model", "input"},
 }
 
 
@@ -285,25 +294,155 @@ def load_reference(path):
     return f"data:{media_type};base64,{base64.b64encode(raw).decode()}"
 
 
+# --- per-model request spec: --param validation, before any paid request --------
+
+def target_endpoint_path(modality, endpoint, transparent):
+    """The API path generate.py is about to call, so the matching section
+    of the model's request spec can be picked (spec.py's endpoints are
+    keyed by path)."""
+    if modality == "video":
+        return "/api/v1/videos"
+    if modality == "speech":
+        return "/api/v1/audio/speech"
+    if transparent or endpoint == "images":
+        return "/api/v1/images"
+    return "/api/v1/chat/completions"  # endpoint auto/chat: make_image tries chat first
+
+
+def load_spec(model):
+    """spec.load(model), or None with a stderr warning on any failure.
+    The spec must never block a generation (spec.py's docstring)."""
+    try:
+        return spec.load(model)
+    except (spec.SpecError, ValueError) as e:
+        print(f"clouter visual: no request spec for {model} ({e}); sending the generic request",
+              file=sys.stderr)
+        return None
+
+
+def endpoint_fields(spec_result, path):
+    """The fields dict of spec_result's endpoint matching path, or None
+    when the spec didn't load or has no section for that path."""
+    if spec_result is None:
+        return None
+    for endpoint in spec_result["endpoints"]:
+        if endpoint["path"] == path:
+            return endpoint["fields"]
+    return None
+
+
+def coerce_param(raw, field_type):
+    """A --param's raw string value, coerced by the spec field's type.
+    Raises ValueError or json.JSONDecodeError on a bad value."""
+    if field_type == "integer":
+        return int(raw)
+    if field_type == "number":
+        return float(raw)
+    if field_type == "boolean":
+        low = raw.strip().lower()
+        if low in ("true", "false"):
+            return low == "true"
+        raise ValueError(f"boolean must be true or false, got {raw!r}")
+    if field_type in ("array", "object"):
+        return json.loads(raw)
+    return raw  # string, or a typeless passthrough field (chat/completions' extras)
+
+
+def validate_value(name, value, field):
+    """enum/min/max errors for one already-coerced field value, as
+    stderr-ready strings naming the allowed values."""
+    errors = []
+    if field["enum"] is not None and value not in field["enum"]:
+        allowed = ", ".join(str(v) for v in field["enum"])
+        errors.append(f"{name} must be one of: {allowed} (got {value!r})")
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if field["min"] is not None and value < field["min"]:
+            errors.append(f"{name} must be >= {field['min']} (got {value})")
+        if field["max"] is not None and value > field["max"]:
+            errors.append(f"{name} must be <= {field['max']} (got {value})")
+    return errors
+
+
+# fields --param must not touch: sent automatically (always_supplied) or
+# owned by another flag, which would otherwise silently win or collide.
+PARAM_OWNED_BY_FLAG = {
+    "aspect_ratio": "--aspect", "duration": "--duration", "voice": "--voice",
+    "background": "--transparent", "output_format": "--transparent",
+}
+
+
+def build_params(param_args, fields, derived, always_supplied):
+    """--param key=value entries (repeatable) plus the values generate.py
+    itself derives from --aspect/--duration/--voice/--transparent, checked
+    against fields (the spec endpoint's field dict, or None when the spec
+    didn't load -- then nothing is checked, per spec.py's contract that a
+    missing spec never blocks a generation). Returns (extra, errors):
+    extra is the --param fields, coerced and ready to merge top-level into
+    the request body; errors is one line per bad or missing field, and a
+    non-empty errors means extra must not be sent."""
+    errors = []
+    extra = {}
+    for item in param_args:
+        if "=" not in item:
+            errors.append(f"--param must be key=value, got {item!r}")
+            continue
+        key, raw = item.split("=", 1)
+        if key in always_supplied:
+            errors.append(f"--param {key} is sent automatically by generate.py; it cannot be overridden")
+            continue
+        if key in PARAM_OWNED_BY_FLAG:
+            errors.append(f"--param {key} is set by {PARAM_OWNED_BY_FLAG[key]}, not --param")
+            continue
+        if fields is not None:
+            field = fields.get(key)
+            if field is None:
+                errors.append(f"unknown --param {key} (not in this model's request spec for this endpoint)")
+                continue
+            try:
+                value = coerce_param(raw, field["type"])
+            except (ValueError, json.JSONDecodeError) as e:
+                errors.append(f"--param {key}: cannot read {raw!r} as {field['type']}: {e}")
+                continue
+            errors.extend(validate_value(key, value, field))
+        else:
+            try:
+                value = json.loads(raw)
+            except (ValueError, json.JSONDecodeError):
+                value = raw
+        extra[key] = value
+
+    if fields is not None:
+        for name, value in derived.items():
+            field = fields.get(name)
+            if field is not None:
+                errors.extend(validate_value(name, value, field))
+        supplied = set(extra) | set(derived) | always_supplied
+        for name, field in fields.items():
+            if field["required"] and name not in supplied:
+                errors.append(f"missing required field {name}"
+                              + (f": {field['description']}" if field["description"] else ""))
+    return extra, errors
+
+
 # --- the three producers: each returns (bytes, media_type, ext, cost) ---------
 
-def make_image(model, prompt, aspect, key, endpoint, transparent=False, reference=None):
+def make_image(model, prompt, aspect, key, endpoint, transparent=False, reference=None, params=None):
     if transparent:
         # alpha only exists on /api/v1/images; --endpoint chat/auto do not apply.
-        return make_image_via_images(model, prompt, aspect, key, transparent=True, reference=reference)
+        return make_image_via_images(model, prompt, aspect, key, transparent=True, reference=reference, params=params)
     if endpoint == "images":
-        return make_image_via_images(model, prompt, aspect, key, reference=reference)
+        return make_image_via_images(model, prompt, aspect, key, reference=reference, params=params)
     try:
-        return make_image_via_chat(model, prompt, aspect, key, reference=reference)
+        return make_image_via_chat(model, prompt, aspect, key, reference=reference, params=params)
     except ApiError as e:
         # auto falls back once: some models only exist behind /api/v1/images
         # and chat/completions says so in a 404.
         if endpoint == "auto" and e.status == 404 and "/api/v1/images" in str(e):
-            return make_image_via_images(model, prompt, aspect, key, reference=reference)
+            return make_image_via_images(model, prompt, aspect, key, reference=reference, params=params)
         raise
 
 
-def make_image_via_chat(model, prompt, aspect, key, reference=None):
+def make_image_via_chat(model, prompt, aspect, key, reference=None, params=None):
     content = prompt
     if reference:
         # a reference image rides next to the text part, not instead of it.
@@ -319,7 +458,12 @@ def make_image_via_chat(model, prompt, aspect, key, reference=None):
         "modalities": ["image"],
         "usage": {"include": True},
     }
+    if params:
+        body.update(params)
     if aspect:
+        # OpenRouter's chat/completions image convention: nested under
+        # image_config. No real model spec lists aspect_ratio top-level on
+        # chat/completions, so this is unconditional.
         body["image_config"] = {"aspect_ratio": aspect}
     answer = request_json("POST", "/api/v1/chat/completions", key, body)
     choices = answer.get("choices") or []
@@ -342,10 +486,15 @@ def make_image_via_chat(model, prompt, aspect, key, reference=None):
     return raw, media_type, ext, cost_of(answer.get("usage"))
 
 
-def make_image_via_images(model, prompt, aspect, key, transparent=False, reference=None):
+def make_image_via_images(model, prompt, aspect, key, transparent=False, reference=None, params=None):
     body = {"model": model, "prompt": prompt}
+    if params:
+        body.update(params)
     if aspect:
-        body["image_config"] = {"aspect_ratio": aspect}
+        # top-level, not nested under image_config: /api/v1/images' own
+        # spec (e.g. recraft-v4-vector, gemini image's images section)
+        # wants aspect_ratio as a plain request field.
+        body["aspect_ratio"] = aspect
     if transparent:
         body["background"] = "transparent"
         body["output_format"] = "png"
@@ -364,8 +513,10 @@ def make_image_via_images(model, prompt, aspect, key, transparent=False, referen
     return raw, media_type, ext, cost_of(answer.get("usage"))
 
 
-def make_video(model, prompt, aspect, duration, key):
+def make_video(model, prompt, aspect, duration, key, params=None):
     body = {"model": model, "prompt": prompt}
+    if params:
+        body.update(params)
     if aspect:
         body["aspect_ratio"] = aspect
     if duration:
@@ -405,8 +556,10 @@ def default_voice(model, key):
     return None
 
 
-def make_speech(model, prompt, voice, key):
+def make_speech(model, prompt, voice, key, params=None):
     body = {"model": model, "input": prompt, "response_format": "mp3"}
+    if params:
+        body.update(params)
     voice = voice or default_voice(model, key)
     if voice:
         body["voice"] = voice
@@ -626,6 +779,9 @@ def main(argv):
     parser.add_argument("--trim-margin", type=int, default=32,
                         help="margin left around the content when --trim crops (default 32)")
     parser.add_argument("--reference", help="existing PNG/JPEG/WebP/SVG to edit or vary (raster and vector only)")
+    parser.add_argument("--param", action="append", default=[], dest="params", metavar="KEY=VALUE",
+                        help="extra request field for the model's spec (repeatable); "
+                             "coerced and validated against the model's request spec")
     parser.add_argument("--preview", action="store_true",
                         help="also write a GitHub dark/light contact sheet through preview.py")
     parser.add_argument("--rounds", type=int, default=2,
@@ -681,6 +837,43 @@ def main(argv):
                   "(architecture.input_modalities has no image)", file=sys.stderr)
             return 8
 
+    # Pick the spec section for the endpoint generate.py is about to call,
+    # and validate every --param plus what --aspect/--duration/--voice/
+    # --transparent themselves send, before any paid request. A model with
+    # no request spec (network down, 404, ...) skips validation entirely --
+    # load_spec already warned on stderr, and the generic request goes out
+    # exactly as before spec.py existed.
+    endpoint_path = target_endpoint_path(args.modality, args.endpoint, args.transparent)
+    spec_result = load_spec(args.model)
+    effective_endpoint = args.endpoint
+    if (args.modality in ("raster_image", "vector_svg") and not args.transparent
+            and args.endpoint == "auto"
+            and endpoint_fields(spec_result, "/api/v1/chat/completions") is None
+            and endpoint_fields(spec_result, "/api/v1/images") is not None):
+        # This model's spec only has an /api/v1/images section: auto's
+        # chat/completions try would just spend a call on a guaranteed 404.
+        # Target images directly, and validate against its section.
+        endpoint_path = "/api/v1/images"
+        effective_endpoint = "images"
+    fields = endpoint_fields(spec_result, endpoint_path)
+
+    derived = {}
+    if args.aspect:
+        derived["aspect_ratio"] = args.aspect
+    if args.modality == "video" and args.duration:
+        derived["duration"] = args.duration
+    if args.modality == "speech" and args.voice:
+        derived["voice"] = args.voice
+    if endpoint_path == "/api/v1/images" and args.transparent:
+        derived["background"] = "transparent"
+        derived["output_format"] = "png"
+
+    params, param_errors = build_params(args.params, fields, derived, ALWAYS_SUPPLIED.get(endpoint_path, set()))
+    if param_errors:
+        for message in param_errors:
+            print(f"generate: {message}", file=sys.stderr)
+        return 2
+
     try:
         key = keys.get("OPENROUTER_API_KEY")
     except (keys.MissingKey, keys.UnsafeFile) as e:
@@ -690,11 +883,13 @@ def main(argv):
     try:
         if args.modality in ("raster_image", "vector_svg"):
             raw, media_type, ext, cost = make_image(args.model, args.prompt, args.aspect, key,
-                                                     args.endpoint, args.transparent, reference)
+                                                     effective_endpoint, args.transparent, reference,
+                                                     params=params)
         elif args.modality == "video":
-            raw, media_type, ext, cost = make_video(args.model, args.prompt, args.aspect, args.duration, key)
+            raw, media_type, ext, cost = make_video(args.model, args.prompt, args.aspect, args.duration, key,
+                                                     params=params)
         else:
-            raw, media_type, ext, cost = make_speech(args.model, args.prompt, args.voice, key)
+            raw, media_type, ext, cost = make_speech(args.model, args.prompt, args.voice, key, params=params)
     except JobFailed as e:
         print(f"generate: {e}", file=sys.stderr)
         return 5
@@ -744,7 +939,8 @@ def main(argv):
             import critique
             critique_result = critique.run(path, args.prompt, args.model, rounds=args.rounds,
                                             critic=args.critic, key=key, aspect=args.aspect,
-                                            transparent=args.transparent, request=args.request)
+                                            transparent=args.transparent, request=args.request,
+                                            params=params, endpoint=effective_endpoint)
             result["critique"] = critique_result
             result["final"] = critique_result["final"]
             preview_target = critique_result["files"]

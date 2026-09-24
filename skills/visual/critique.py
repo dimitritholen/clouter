@@ -449,7 +449,7 @@ def build_escalation(prompt, gen_model, modality, final_path, defects, tried, ro
 
 
 def run(path, prompt, gen_model, rounds=2, critic=None, key=None, aspect=None, transparent=False,
-        initial_defects=None, tried=None, request=None):
+        initial_defects=None, tried=None, request=None, params=None, endpoint="auto"):
     """Judge path against prompt, fixing through gen_model for up to
     `rounds` tries. initial_defects seeds the first judged result instead
     of calling the critic (continuing an earlier critique with a new
@@ -457,7 +457,10 @@ def run(path, prompt, gen_model, rounds=2, critic=None, key=None, aspect=None, t
     fresh escalation's candidates. request, when given, is the user's own
     verbatim message: every critic call sees it alongside prompt, told it
     wins where the two differ, and it is carried into any escalation
-    command too. Never prints or exits: raises ValueError
+    command too. params and endpoint are generate.py's already-validated
+    --param fields and the endpoint the first (paid-for) round used, so
+    every fix round sends the same request shape, not a bare default.
+    Never prints or exits: raises ValueError
     (bad args / missing file / unsupported type), keys.MissingKey/
     UnsafeFile (no key), generate.ApiError or catalogue.CatalogueError (API
     failure), or CritiqueParseError (unparseable critic reply)."""
@@ -502,7 +505,7 @@ def run(path, prompt, gen_model, rounds=2, critic=None, key=None, aspect=None, t
         if catalogue.reference_supported(gen_model):
             reference = generate.load_reference(current_path)
         raw, media_type, ext, gen_cost = generate.make_image(
-            gen_model, fix_prompt, aspect, key, "auto", transparent, reference)
+            gen_model, fix_prompt, aspect, key, endpoint, transparent, reference, params=params)
         add_cost(gen_cost)
         new_path = next_round_path(path, rounds_used, ext)
         directory = os.path.dirname(new_path)

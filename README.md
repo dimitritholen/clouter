@@ -16,9 +16,13 @@ cheapest. It injects one instruction block that asks with `AskUserQuestion`:
 Jev's pick first and marked Recommended, then cheap to expensive, a price in
 every label, "Stay with Claude" last. On a choice, `skills/visual/generate.py`
 writes the file (never overwriting an existing one) and prints its path and
-the real cost. A raster or vector generation is also judged by a
-vision-model critic and, if it finds defects, fixed for a few rounds before
-that report.
+the real cost. Before the paid request, `skills/visual/spec.py` fetches the
+picked model's own `llms.txt` so the request stays valid and uses that
+model's own fields (resolution, seed, generate_audio, ...) rather than a
+generic guess; those go through generate.py's repeatable `--param
+key=value`, validated against the model's spec before anything is sent. A
+raster or vector generation is also judged by a vision-model critic and, if
+it finds defects, fixed for a few rounds before that report.
 
 ## Install
 

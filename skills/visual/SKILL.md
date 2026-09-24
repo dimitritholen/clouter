@@ -28,7 +28,30 @@ that choice.
    model", ...), Jev's pick first and marked Recommended, then cheap to
    expensive, a price in every label, "Stay with Claude" last. Never twice
    for one prompt.
-3. **You generate.** On a model choice, first turn the request into a design
+3. **You check the model's own fields.** Before generate.py, run:
+
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/skills/visual/spec.py" <chosen id>
+   ```
+
+   It prints the model's request fields for each endpoint it serves, parsed
+   from its `llms.txt`. Read the fields for the endpoint generate.py is
+   about to call and pick values for the optional ones that actually serve
+   this request: `resolution`/`size` for the quality asked, `generate_audio`
+   when the user wants sound, `seed` when they need a reproducible result,
+   `frame_images`/`input_references` when they supplied images,
+   `output_format`/`n` when relevant. Weigh cost before reaching for
+   resolution or duration — both bill more — and say so when you choose a
+   higher one. Don't set a field the request gives no reason to touch. Pass
+   these as `--param key=value` (repeatable); use `--aspect`, `--duration`,
+   `--voice` and `--reference` instead for the fields that have their own
+   flag, and never `--param` for `model`, `prompt`, `messages` or `input` —
+   generate.py owns those. If generate.py refuses a `--param` value (exit 2,
+   listing the allowed values on stderr), pick again from that list rather
+   than retrying blindly. If spec.py fails, carry on without it — the
+   generic request still goes out.
+
+4. **You generate.** On a model choice, first turn the request into a design
    brief: subject, hierarchy, style, colours, background, what to leave out.
    Keep the user's own words for subject and style — "give me 2 versions: 1
    svg and 1 png, should look good on dark and light GitHub" is instructions
@@ -43,6 +66,7 @@ that choice.
      --prompt-file <path to the design brief> [--out <path>] \
      [--endpoint auto|chat|images] [--aspect 16:9] [--duration 8] [--voice alloy] \
      [--transparent] [--trim [--trim-margin 32]] [--reference <file>] [--preview] \
+     [--param key=value ...] \
      [--rounds 2] [--critic <model id>] [--no-critique] \
      [--request-file <path to the user's own message, verbatim>]
    ```
