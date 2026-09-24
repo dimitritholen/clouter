@@ -32,6 +32,8 @@
     manualModelClose: document.getElementById('manual-model-close'),
     manualModelSearch: document.getElementById('manual-model-search'),
     manualModelList: document.getElementById('manual-model-list'),
+    manualModelThName: document.getElementById('manual-model-th-name'),
+    manualModelThPrice: document.getElementById('manual-model-th-price'),
     feedbackText: document.getElementById('feedback-text'),
     branchToggleWrap: document.getElementById('branch-toggle-wrap'),
     branchToggle: document.getElementById('branch-toggle'),
@@ -49,6 +51,7 @@
     modelChoice: {}, // round n -> null (keep) | {type: 'suggested'|'manual', id, name}
     catalogue: null, // null | 'loading' | 'error' | [entries]
     catalogueError: null,
+    catalogueSort: { key: 'price', dir: 'asc' },
     timelineController: null,
     overlayEl: null,
     annotationOverlayEl: null,
@@ -505,22 +508,68 @@
     });
   }
 
+  function emptyManualRow(text) {
+    var tr = document.createElement('tr');
+    var td = document.createElement('td');
+    td.className = 'manual-model-empty';
+    td.colSpan = 4;
+    td.textContent = text;
+    tr.appendChild(td);
+    return tr;
+  }
+
+  function sortCatalogueItems(items) {
+    var key = state.catalogueSort.key;
+    var dir = state.catalogueSort.dir === 'desc' ? -1 : 1;
+    var sorted = items.slice();
+    sorted.sort(function (a, b) {
+      var av, bv;
+      if (key === 'price') {
+        av = typeof a.price === 'number' ? a.price : Infinity;
+        bv = typeof b.price === 'number' ? b.price : Infinity;
+      } else {
+        av = (a.name || a.id || '').toLowerCase();
+        bv = (b.name || b.id || '').toLowerCase();
+      }
+      if (av < bv) return -1 * dir;
+      if (av > bv) return 1 * dir;
+      return 0;
+    });
+    return sorted;
+  }
+
+  function updateManualModelSortHeaders() {
+    [els.manualModelThName, els.manualModelThPrice].forEach(function (th) {
+      var key = th === els.manualModelThName ? 'name' : 'price';
+      if (state.catalogueSort.key === key) {
+        th.setAttribute('aria-sort', state.catalogueSort.dir === 'desc' ? 'descending' : 'ascending');
+      } else {
+        th.setAttribute('aria-sort', 'none');
+      }
+    });
+  }
+
+  function setManualModelSort(key) {
+    if (state.catalogueSort.key === key) {
+      state.catalogueSort.dir = state.catalogueSort.dir === 'asc' ? 'desc' : 'asc';
+    } else {
+      state.catalogueSort.key = key;
+      state.catalogueSort.dir = key === 'price' ? 'asc' : 'asc';
+    }
+    renderManualModelList();
+  }
+
   function renderManualModelList() {
     var listEl = els.manualModelList;
     listEl.innerHTML = '';
+    updateManualModelSortHeaders();
 
     if (state.catalogue === 'loading') {
-      var loading = document.createElement('p');
-      loading.className = 'manual-model-empty';
-      loading.textContent = 'Loading catalogue…';
-      listEl.appendChild(loading);
+      listEl.appendChild(emptyManualRow('Loading catalogue…'));
       return;
     }
     if (state.catalogue === 'error') {
-      var errEl = document.createElement('p');
-      errEl.className = 'manual-model-empty';
-      errEl.textContent = state.catalogueError || 'Failed to load catalogue.';
-      listEl.appendChild(errEl);
+      listEl.appendChild(emptyManualRow(state.catalogueError || 'Failed to load catalogue.'));
       return;
     }
 
@@ -529,45 +578,59 @@
       if (!q) return true;
       return (m.id || '').toLowerCase().indexOf(q) !== -1 || (m.name || '').toLowerCase().indexOf(q) !== -1;
     });
+    items = sortCatalogueItems(items);
 
     if (!items.length) {
-      var empty = document.createElement('p');
-      empty.className = 'manual-model-empty';
-      empty.textContent = 'No matching models.';
-      listEl.appendChild(empty);
+      listEl.appendChild(emptyManualRow('No models match'));
       return;
     }
 
+    var round = state.selectedRound;
+    var picked = round != null ? state.modelChoice[round] : null;
+
     items.forEach(function (m) {
-      var row = document.createElement('button');
-      row.type = 'button';
+      var row = document.createElement('tr');
       row.className = 'manual-model-row';
-
-      var name = document.createElement('span');
-      name.className = 'manual-model-name';
-      name.textContent = m.name;
-
-      var id = document.createElement('span');
-      id.className = 'manual-model-id';
-      id.textContent = m.id;
-
-      row.appendChild(name);
-      row.appendChild(id);
-
-      if (m.reference_supported) {
-        var badge = document.createElement('span');
-        badge.className = 'ref-badge';
-        badge.textContent = 'ref';
-        row.appendChild(badge);
+      row.tabIndex = 0;
+      if (picked && picked.type === 'manual' && picked.id === m.id) {
+        row.classList.add('picked');
+        row.setAttribute('aria-selected', 'true');
       }
 
-      var price = document.createElement('span');
-      price.className = 'manual-model-price';
-      price.textContent = formatPrice(m.price, m.unit);
-      row.appendChild(price);
+      var nameCell = document.createElement('td');
+      nameCell.className = 'manual-model-name';
+      nameCell.textContent = m.name;
+      row.appendChild(nameCell);
+
+      var idCell = document.createElement('td');
+      idCell.className = 'manual-model-id';
+      idCell.textContent = m.id;
+      row.appendChild(idCell);
+
+      var refCell = document.createElement('td');
+      refCell.className = 'manual-model-ref';
+      refCell.textContent = m.reference_supported ? 'yes' : '—';
+      row.appendChild(refCell);
+
+      var priceCell = document.createElement('td');
+      priceCell.className = 'manual-model-price';
+      priceCell.textContent = formatPrice(m.price, m.unit);
+      row.appendChild(priceCell);
 
       row.addEventListener('click', function () {
         pickManualModel(m);
+      });
+      row.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault();
+          pickManualModel(m);
+        } else if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
+          e.preventDefault();
+          var rows = Array.prototype.slice.call(listEl.querySelectorAll('.manual-model-row'));
+          var idx = rows.indexOf(row);
+          var next = e.key === 'ArrowDown' ? rows[idx + 1] : rows[idx - 1];
+          if (next) next.focus();
+        }
       });
       listEl.appendChild(row);
     });
@@ -595,6 +658,19 @@
   });
 
   els.manualModelSearch.addEventListener('input', renderManualModelList);
+
+  [els.manualModelThName, els.manualModelThPrice].forEach(function (th) {
+    var key = th === els.manualModelThName ? 'name' : 'price';
+    th.addEventListener('click', function () {
+      setManualModelSort(key);
+    });
+    th.addEventListener('keydown', function (e) {
+      if (e.key === 'Enter' || e.key === ' ') {
+        e.preventDefault();
+        setManualModelSort(key);
+      }
+    });
+  });
 
   function buildMedia(round) {
     els.mediaView.innerHTML = '';

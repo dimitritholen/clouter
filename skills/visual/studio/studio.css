@@ -597,8 +597,10 @@ textarea {
   color: var(--text);
   box-shadow: var(--shadow);
   padding: 16px;
-  width: min(520px, 90vw);
-  max-height: 80vh;
+  width: min(1000px, 95vw);
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
 }
 
 .manual-model-dialog::backdrop {
@@ -626,60 +628,100 @@ textarea {
   background: var(--surface);
   color: var(--text);
   margin-bottom: 10px;
+  flex: none;
 }
 
-.manual-model-list {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  max-height: 50vh;
+.manual-model-table-wrap {
   overflow: auto;
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.manual-model-table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.manual-model-table thead th {
+  position: sticky;
+  top: 0;
+  background: var(--surface);
+  text-align: left;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-muted);
+  z-index: 1;
+}
+
+.manual-model-th-price {
+  text-align: right;
+}
+
+.manual-model-sortable {
+  cursor: pointer;
+  user-select: none;
+}
+
+.manual-model-sortable:hover,
+.manual-model-sortable:focus-visible {
+  color: var(--text);
+}
+
+.manual-model-sortable[aria-sort="ascending"]::after {
+  content: " ▲";
+}
+
+.manual-model-sortable[aria-sort="descending"]::after {
+  content: " ▼";
 }
 
 .manual-model-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  width: 100%;
-  padding: 6px 8px;
-  border: 1px solid transparent;
-  border-radius: 4px;
-  background: none;
-  text-align: left;
   cursor: pointer;
+  border-bottom: 1px solid var(--border);
 }
 
 .manual-model-row:hover,
 .manual-model-row:focus-visible {
   background: var(--surface-2);
-  border-color: var(--border);
+}
+
+.manual-model-row.picked {
+  background: var(--surface-2);
+  outline: 2px solid var(--accent);
+  outline-offset: -2px;
+}
+
+.manual-model-table td {
+  padding: 6px 8px;
+  vertical-align: top;
 }
 
 .manual-model-name {
   font-weight: 600;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
+  overflow-wrap: anywhere;
 }
 
 .manual-model-id {
   color: var(--text-muted);
   font-size: 12px;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  overflow-wrap: anywhere;
+}
+
+.manual-model-ref {
+  color: var(--text-muted);
   white-space: nowrap;
 }
 
 .manual-model-price {
-  margin-left: auto;
-  color: var(--text-muted);
-  font-size: 12px;
-  flex: none;
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .manual-model-empty {
   color: var(--text-muted);
   padding: 8px;
+  text-align: center;
 }

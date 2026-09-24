@@ -88,7 +88,19 @@
   </div>
   <label for="manual-model-search" class="sr-only">Search models</label>
   <input id="manual-model-search" type="text" placeholder="Search by name or id…" autocomplete="off">
-  <div id="manual-model-list" class="manual-model-list" aria-label="Catalogue models"></div>
+  <div class="manual-model-table-wrap">
+    <table class="manual-model-table">
+      <thead>
+        <tr>
+          <th id="manual-model-th-name" class="manual-model-sortable" scope="col" tabindex="0" role="button" aria-sort="none">Model</th>
+          <th scope="col">ID</th>
+          <th scope="col">Reference image</th>
+          <th id="manual-model-th-price" class="manual-model-sortable manual-model-th-price" scope="col" tabindex="0" role="button" aria-sort="ascending">Price</th>
+        </tr>
+      </thead>
+      <tbody id="manual-model-list" aria-label="Catalogue models"></tbody>
+    </table>
+  </div>
 </dialog>
 
 <script src="/static/app.js"></script>
