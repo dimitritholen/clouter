@@ -13,6 +13,7 @@ work="$(mktemp -d)"
 S="$work/session"
 cleanup() {
   "$SCRIPT" stop --session "$S" >/dev/null 2>&1
+  [ -n "${S2:-}" ] && "$SCRIPT" stop --session "$S2" >/dev/null 2>&1
   [ -n "${or_server_pid:-}" ] && kill "$or_server_pid" 2>/dev/null
   rm -rf "$work"
 }
@@ -320,6 +321,34 @@ done
 session=$(cat "$S/session.json")
 check_eq "POST /api/models failing round: error message present" \
   "$(jget "$session" 'bool((d.get("models_request") or {}).get("error"))')" "True"
+
+# --- POST /api/models with no stored key: a plain setup message, not raw ---
+# exception text. Its own server/env so it doesn't leak the OPENROUTER_API_KEY
+# already exported above into this case.
+S2="$work/session-nokey"
+out=$(env -u OPENROUTER_API_KEY -u EVAL_OPENROUTER_API_KEY \
+  CLOUTER_CREDENTIALS="$work/nokey-credentials-file" \
+  "$SCRIPT" push --session "$S2" --file "$work/one.png" --model test/model --cost 0.01 \
+  --brief-file "$work/brief.txt" --request-file "$work/request.txt" --modality raster_image 2>"$work/stderr")
+check_code "push for no-key session: exit 0" "$?" 0
+URL2=$(jget "$out" 'd["url"]')
+printf '{"round": 1}' > "$work/round-nokey.json"
+URL_MAIN="$URL"
+URL="$URL2"
+resp=$(http POST /api/models "$work/round-nokey.json" application/json)
+URL="$URL_MAIN"
+check_eq "POST /api/models no key: 202" "${resp%% *}" "202"
+done=0
+for _ in $(seq 1 50); do
+  status=$(jget "$(cat "$S2/session.json")" '(d.get("models_request") or {}).get("status")')
+  [ "$status" = "error" ] && { done=1; break; }
+  sleep 0.1
+done
+[ "$done" -eq 1 ] && printf 'ok   POST /api/models no key: reaches error\n' || { printf 'FAIL POST /api/models no key: still %s\n' "$status"; fail=1; }
+check_eq "POST /api/models no key: error message" \
+  "$(jget "$(cat "$S2/session.json")" '(d.get("models_request") or {}).get("error")')" \
+  "No OpenRouter key stored. Run /clouter:visual setup in Claude Code, then try again."
+"$SCRIPT" stop --session "$S2" 2>"$work/stderr"
 
 # --- GET /api/catalogue: the stubbed list, sorted by price ------------------
 resp=$(http GET /api/catalogue)

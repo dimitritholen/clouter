@@ -586,9 +586,16 @@ def run_model_options(d, studio, n):
             session.get("modality"), round_.get("brief") or "", request=session.get("request"),
             defects=round_.get("defects"), exclude=exclude, key=key)
     except Exception as e:  # noqa: BLE001 - any failure is reported to the page, never crashes the thread
+        error = str(e)
+        if isinstance(e, critique.keys.UnsafeFile):
+            error = ("The OpenRouter credentials file has unsafe permissions. "
+                      "Run /clouter:visual setup in Claude Code to store the key again.")
+        elif isinstance(e, critique.keys.MissingKey):
+            error = ("No OpenRouter key stored. Run /clouter:visual setup in Claude Code, "
+                      "then try again.")
         with locked(d):
             session = load_session(d)
-            session["models_request"] = {"round": n, "status": "error", "error": str(e)}
+            session["models_request"] = {"round": n, "status": "error", "error": error}
             save_session(d, session)
         studio.changed()
         return
