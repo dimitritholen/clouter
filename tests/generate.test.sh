@@ -56,6 +56,7 @@ INTERLACED_PNG = _interlaced_png()
 SVG_BAD_UTF8 = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 4 4">\xff\xfe<!-- bad --></svg>'
 MP4 = b"\x00\x00\x00\x18ftypmp42" + b"\x00" * 24
 MP3 = b"ID3" + b"\x00" * 13
+PCM = (b"\x00\x01\xff\x00") * 300
 polls = {}
 critic_calls = {}
 
@@ -137,6 +138,9 @@ class Handler(BaseHTTPRequestHandler):
             if gen == "gen-late" and polls.get("gen-late", 0) == 0:
                 polls["gen-late"] = 1
                 self.send_json(404, {"error": {"message": "not yet"}}); return
+            if gen == "gen-slow" and polls.get("gen-slow", 0) < 2:
+                polls["gen-slow"] = polls.get("gen-slow", 0) + 1
+                self.send_json(404, {"error": {"message": "not yet"}}); return
             self.send_json(200, {"data": {"id": gen, "total_cost": 0.0003}}); return
         self.send_json(404, {"error": {"message": "no such path"}})
 
@@ -202,6 +206,16 @@ class Handler(BaseHTTPRequestHandler):
             job = "job-fails" if "fail" in model else "job-1"
             self.send_json(200, {"id": job, "status": "pending", "polling_url": f"{self.base()}/api/v1/videos/{job}"}); return
         if self.path == "/api/v1/audio/speech":
+            response_format = body.get("response_format")
+            if "pcmonly" in model and response_format != "pcm":
+                self.send_json(400, {"error": {"message":
+                    'Gemini TTS only supports response_format="pcm". Got "%s".' % response_format,
+                    "code": 400}}); return
+            if "badparam" in model and response_format == "mp3":
+                self.send_json(400, {"error": {"message": "stand-in refuses this today", "code": 400}}); return
+            if response_format == "pcm":
+                gen = "gen-slow" if "slow" in model else "gen-pcm"
+                self.send(200, PCM, "audio/pcm;rate=24000;channels=1", {"X-Generation-Id": gen}); return
             gen = "gen-late" if "late" in model else "gen-audio"
             self.send(200, MP3, "audio/mpeg", {"X-Generation-Id": gen}); return
         self.send_json(404, {"error": {"message": "no such path"}})
@@ -294,6 +308,31 @@ check_eq "no voice field when none is known" "$(jq -c 'select(.path=="/api/v1/au
 
 run --model acme/tts-late --modality speech --prompt "Late stats"
 check_eq "generation stats 404 once: retried and found" "$(field .cost)" "0.0003"
+
+run --model acme/tts-pcmonly --modality speech --prompt "Gemini only speaks pcm"
+check_code "pcm-only model: written" "$code" 0
+check_eq "pcm-only: mp3 rejected, retried as pcm, wrapped into a wav" "$(field '[.path, .media_type] | @csv')" '"assets/gemini-only-speaks-pcm.wav","audio/wav"'
+check_eq "pcm-only: wav header parses back to rate/channels/width" \
+  "$(python3 -c 'import wave; w = wave.open("assets/gemini-only-speaks-pcm.wav"); print(w.getframerate(), w.getnchannels(), w.getsampwidth())')" \
+  "24000 1 2"
+check_eq "pcm-only: exactly two speech requests (mp3 then pcm)" "$(jq -r 'select(.path=="/api/v1/audio/speech") | .body.response_format' "$work/requests.jsonl" | tr '\n' ',')" "mp3,pcm,"
+
+run --model acme/tts --modality speech --prompt "Explicit pcm" --param response_format=pcm
+check_code "--param response_format=pcm: written" "$code" 0
+check_eq "--param response_format=pcm: single request, no mp3 attempt" "$(jq -r 'select(.path=="/api/v1/audio/speech") | .body.response_format' "$work/requests.jsonl" | tr '\n' ',')" "pcm,"
+check_eq "--param response_format=pcm: still a wav" "$(field .media_type)" "audio/wav"
+
+CLOUTER_COST_WAIT_SECONDS=0.01 run --model acme/tts-slow --modality speech --prompt "Slow cost lookup" --param response_format=pcm
+check_code "cost lookup 404 twice: written" "$code" 0
+check_eq "cost lookup 404 twice: retried until found" "$(field .cost)" "0.0003"
+
+run --model acme/tts-badparam --modality speech --prompt "Unrelated 400"
+check_code "unrelated 400: no pcm retry, exit 4" "$code" 4
+check_eq "unrelated 400: message on stderr, not the gemini one" "$(grep -c 'stand-in refuses this today' "$work/stderr")" "1"
+check_eq "unrelated 400: only one speech request" "$(grep -c '/api/v1/audio/speech' "$work/requests.jsonl")" "1"
+
+run --model acme/tts --modality speech --prompt "Still mp3 by default"
+check_eq "mp3 default path unchanged" "$(field .media_type)" "audio/mpeg"
 
 # --- failures and usage ---------------------------------------------------------
 run --model acme/boom --modality raster_image --prompt "x"

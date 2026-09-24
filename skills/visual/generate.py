@@ -84,7 +84,9 @@ key, 4 API failure, 5 the video job failed, 6 the model is unusable for
 this account (upstream said why), 7 --transparent on a model with no
 native alpha channel, 8 --reference on a model catalogue.reference_supported
 marks as not taking an image input. OPENROUTER_BASE_URL redirects the API;
-CLOUTER_POLL_SECONDS sets the poll interval (5).
+CLOUTER_POLL_SECONDS sets the poll interval (5). CLOUTER_COST_WAIT_SECONDS
+caps each step of the backoff (1, 2, 4, 8, 8s) while polling a speech
+generation's cost, mainly for tests.
 
 Every successful generation appends one JSON line to a cost log:
 {"ts", "model", "modality", "path" (absolute), "cost"}. The log path is
@@ -105,6 +107,7 @@ Stdlib only.
 
 import argparse
 import base64
+import io
 import json
 import os
 import re
@@ -113,6 +116,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+import wave
 from datetime import datetime, timedelta, timezone
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -133,6 +137,10 @@ EXTENSIONS = {
 }
 HTTP_TIMEOUT = 120.0
 VIDEO_WAIT = 900.0
+# Backoff after a speech generation while GET /api/v1/generation 404s: the
+# id stays unresolved for ~10-15s after the call returns. Each step is
+# capped by CLOUTER_COST_WAIT_SECONDS when set, so tests don't sleep.
+COST_POLL_STEPS = (1, 2, 4, 8, 8)
 MAX_REFERENCE_BYTES = 20 * 1024 * 1024
 REFERENCE_EXTENSIONS = {
     ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
@@ -556,32 +564,96 @@ def default_voice(model, key):
     return None
 
 
+def _cost_poll_steps():
+    cap = os.environ.get("CLOUTER_COST_WAIT_SECONDS")
+    if cap is None:
+        return COST_POLL_STEPS
+    try:
+        cap = float(cap)
+    except ValueError:
+        return COST_POLL_STEPS
+    return tuple(min(step, cap) for step in COST_POLL_STEPS)
+
+
+def _poll_cost(generation_id, key):
+    """Look up a generation's cost by the X-Generation-Id header. The id
+    404s for ~10-15s after the call returns, so retry on 404 with backoff.
+    Any other failure, or the schedule running out, leaves cost None --
+    a logging gap, never a reason to fail the generation itself."""
+    if not generation_id:
+        return None
+    url = f"/api/v1/generation?id={urllib.parse.quote(generation_id)}"
+    for wait in (0,) + _cost_poll_steps():
+        if wait:
+            time.sleep(wait)
+        try:
+            stats = request_json("GET", url, key)
+        except ApiError as e:
+            if e.status == 404:
+                continue
+            return None
+        data = stats.get("data") or {}
+        if isinstance(data.get("total_cost"), (int, float)):
+            return float(data["total_cost"])
+        return None
+    return None
+
+
+def _wrap_pcm_wav(raw, content_type):
+    """Gemini TTS's only response_format is raw 16-bit little-endian PCM
+    with no container; wrap it into a WAV via stdlib `wave` so it plays
+    like any other file. Rate/channels come from the Content-Type's
+    rate=/channels= parameters (e.g. "audio/pcm;rate=24000;channels=1"),
+    defaulting to 24000/1 when absent."""
+    fields = {}
+    for part in (content_type or "").split(";")[1:]:
+        if "=" in part:
+            k, v = part.split("=", 1)
+            fields[k.strip().lower()] = v.strip()
+    try:
+        rate = int(fields.get("rate", 24000))
+    except ValueError:
+        rate = 24000
+    try:
+        channels = int(fields.get("channels", 1))
+    except ValueError:
+        channels = 1
+    buf = io.BytesIO()
+    with wave.open(buf, "wb") as w:
+        w.setnchannels(channels)
+        w.setsampwidth(2)
+        w.setframerate(rate)
+        w.writeframes(raw)
+    return buf.getvalue(), "audio/wav", "wav"
+
+
 def make_speech(model, prompt, voice, key, params=None):
-    body = {"model": model, "input": prompt, "response_format": "mp3"}
+    user_response_format = (params or {}).get("response_format")
+    body = {"model": model, "input": prompt, "response_format": user_response_format or "mp3"}
     if params:
         body.update(params)
     voice = voice or default_voice(model, key)
     if voice:
         body["voice"] = voice
-    headers, raw = request("POST", "/api/v1/audio/speech", key, body, accept="*/*")
+    try:
+        headers, raw = request("POST", "/api/v1/audio/speech", key, body, accept="*/*")
+    except ApiError as e:
+        message = str(e).lower()
+        if (not user_response_format and e.status == 400
+                and "response_format" in message and "pcm" in message):
+            body["response_format"] = "pcm"
+            headers, raw = request("POST", "/api/v1/audio/speech", key, body, accept="*/*")
+        else:
+            raise
     if not raw:
         raise ApiError(f"{model} returned no audio")
-    ext, media_type = media_ext(headers.get("Content-Type"), "mp3")
-    cost = None
-    generation_id = headers.get("X-Generation-Id")
-    if generation_id:
-        for attempt in range(2):
-            try:
-                stats = request_json("GET", f"/api/v1/generation?id={urllib.parse.quote(generation_id)}", key)
-                data = stats.get("data") or {}
-                if isinstance(data.get("total_cost"), (int, float)):
-                    cost = float(data["total_cost"])
-                break
-            except ApiError as e:
-                if e.status == 404 and attempt == 0:
-                    time.sleep(1)
-                    continue
-                break
+    content_type = headers.get("Content-Type")
+    is_pcm = body.get("response_format") == "pcm" or (content_type or "").split(";")[0].strip().lower() == "audio/pcm"
+    if is_pcm:
+        raw, media_type, ext = _wrap_pcm_wav(raw, content_type)
+    else:
+        ext, media_type = media_ext(content_type, "mp3")
+    cost = _poll_cost(headers.get("X-Generation-Id"), key)
     return raw, media_type, ext, cost
 
 

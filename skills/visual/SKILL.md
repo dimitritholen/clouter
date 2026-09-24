@@ -208,6 +208,8 @@ summary.
 - `OPENROUTER_BASE_URL`, `CLOUTER_CREDENTIALS` — API and key file
   overrides, for tests.
 - `CLOUTER_POLL_SECONDS` — video job poll interval (5).
+- `CLOUTER_COST_WAIT_SECONDS` — caps each step of the backoff while
+  polling a speech generation's cost lookup (unset: 1, 2, 4, 8, 8s).
 - `CLOUTER_VISUAL_LOG` — cost log path override (default
   `visual.jsonl` next to the credentials file).
 

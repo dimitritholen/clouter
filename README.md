@@ -70,6 +70,7 @@ machine, the same run serves a paste page whose URL is printed on stderr;
 | `CLOUTER_VISUAL_MULTI` | `0.3` | Probability from which a further visual modality in the same prompt counts as requested too. |
 | `CLOUTER_VISUAL_LOG` | `visual.jsonl` next to the credentials file | Cost log path override. |
 | `CLOUTER_POLL_SECONDS` | `5` | Poll interval, in seconds, while waiting on a video generation job. |
+| `CLOUTER_COST_WAIT_SECONDS` | unset (steps up to 8s, ~23s total) | Caps each step of the backoff while polling a speech generation's cost lookup (5 retries on 404). Mainly for tests. |
 | `CLOUTER_CRITIQUE` | `1` | Set to `0`, `off` or `false` to skip the post-generation critique pass (same as `--no-critique`). Video and speech are never critiqued. |
 | `CLOUTER_CRITIC` | built-in default model | Overrides the vision model used for critique; `--critic` on the command line wins over it. |
 | `CLOUTER_CREDENTIALS` | `~/.config/clouter/credentials` | Overrides the credentials file path, mainly for tests. |
