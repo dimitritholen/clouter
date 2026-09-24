@@ -2,54 +2,96 @@
 
 # clouter
 
-A standalone Claude Code plugin that routes prompts for images, SVGs, video
-and speech to a priced, Jev-ranked list of OpenRouter models, extracted from
-1337-claude's visual router.
+clouter is a Claude Code plugin for making images, SVGs, video and
+speech. Ask Claude for a logo, an illustration, a short clip or a
+voice-over and instead of Claude describing the thing in words, a real
+OpenRouter model makes it, at a price you see up front, and you steer the
+result in a browser studio until it's right.
 
-## What it does
+## How it works
 
-Ask for a logo, an SVG illustration, a picture, a short clip or a
-voice-over and a `UserPromptSubmit` hook (`skills/visual/route.py`) steps in
-before Claude starts describing the thing in words instead of making it. It
-asks [Jev](https://typesafe.ai), TypeSafe's decision model, what the prompt
-wants (text or code, raster image, vector SVG, video, speech), pulls
-OpenRouter's live model catalogue for that kind, and has Jev rank the six
-cheapest. It injects one instruction block that asks with `AskUserQuestion`:
-Jev's pick first and marked Recommended, then cheap to expensive, a price in
-every label, "Stay with Claude" last. On a choice, `skills/visual/generate.py`
-writes the file (never overwriting an existing one) and prints its path and
-the real cost. Before the paid request, `skills/visual/spec.py` fetches the
-picked model's own `llms.txt` so the request stays valid and uses that
-model's own fields (resolution, seed, generate_audio, ...) rather than a
-generic guess; those go through generate.py's repeatable `--param
-key=value`, validated against the model's spec before anything is sent. A
-raster or vector generation is also judged by a vision-model critic; if using
-the studio (see below), the critic suggests fixes the user can accept or
-dismiss; if using critique.py's normal mode, defects are fixed automatically
-for a few rounds. When a model's `llms.txt` turns out wrong and
-generate.py's own fallback proves it (a speech model that rejects mp3 but
-takes pcm, an image model that only answers on `/api/v1/images`), that is
-remembered in `learned.json` for 30 days, so the next request goes right the
-first time and spec.py no longer offers the rejected value.
+1. A hook notices the request. `skills/visual/route.py` watches every
+   prompt you send and reacts to visual ones (a logo, an SVG, a video, a
+   voice-over, ...).
+2. [Jev](https://typesafe.ai), TypeSafe's decision model, works out what
+   kind of file you want (raster image, vector SVG, video or speech) and
+   ranks OpenRouter's models for it by price and fit.
+3. You pick a model from that ranked list, or choose to stay with Claude.
+4. The chosen model makes round 1.
+5. For an image or SVG, a vision-model critic looks it over and lists what
+   it thinks is wrong.
+6. The studio opens in your browser with the result and the critic's
+   notes.
+7. You give feedback: type new instructions, tick a critic suggestion,
+   draw on the image, drop notes on the video or audio timeline, or pick
+   a different model.
+8. Claude turns your feedback into a better brief and makes the next
+   round, and the loop goes back to step 5.
+9. You press Accept on the round you like, and Claude reports the file
+   and the total cost.
 
-## Studio
+```mermaid
+flowchart TD
+    A["You ask for an image, SVG, video or voice-over"] --> B["Hook notices the request"]
+    B --> C["Jev ranks OpenRouter models by price and fit"]
+    C --> D["You pick a model"]
+    D --> E["Model makes a round"]
+    E --> F["Critic checks it"]
+    F --> G["Studio opens in your browser"]
+    G --> H["You give feedback"]
+    H --> I["Claude rewrites the brief"]
+    I --> E
+    G --> J["You accept"]
+```
 
-After picking a model, each generated image, SVG, video or speech clip opens
-in a browser page on `127.0.0.1`. Claude pushes each round and waits for your
-feedback: you can edit images with a pen tool (colour and line width), an
-eraser, and numbered note pins; mark up video or audio with timeline markers
-and notes; type new instructions in a feedback box; accept suggestions from
-the critic; or branch to explore a variant. The critic's translate mode turns
-your drawn annotations and markers into region-anchored instructions for the
-next prompt. Claude rewrites the brief from your feedback, regenerates (with
-the clean previous round as a reference image where appropriate), and pushes
-the next round, until you press Accept. Session state is saved in
-`~/.cache/clouter/studio/<id>/` (session.json, rounds/, uploads/).
+Before the paid request, `skills/visual/spec.py` fetches the picked
+model's own `llms.txt`, so the request only uses fields that model
+actually supports (resolution, seed, generate_audio, ...) instead of a
+generic guess. When a model's `llms.txt` turns out wrong and a request
+still fails (a speech model that rejects mp3 but takes pcm, an image
+model that only answers on `/api/v1/images`), `generate.py`'s fallback
+catches it and remembers the fix in `learned.json` for 30 days, so the
+next request to that model goes right the first time.
 
-The critic's feedback appears in the page: a summary of the round, a note if
-the model is struggling with the brief, and (when it is) a picker for
-alternative models. You can always ask for a fresh set of Jev-ranked model
-choices, or pick any model from the catalogue by hand.
+## The studio
+
+Every generated image, SVG, video or speech clip opens in a browser page
+on `127.0.0.1`. In the page you can:
+
+- see each round and the critic's summary of it
+- edit an image with a pen tool (colour and line width), an eraser, and
+  numbered note pins
+- mark up video or audio with timeline markers and notes
+- type new instructions in a feedback box
+- accept or dismiss a critic suggestion
+- pick a different model, or branch off a round to explore a variant
+- press Accept once a round is right
+
+```mermaid
+sequenceDiagram
+    participant You
+    participant Studio as Studio page
+    participant Claude
+    participant Models
+
+    Claude->>Studio: push round
+    Studio-->>You: show round and critic notes
+    You->>Studio: send feedback
+    Studio-->>Claude: wait returns with feedback
+    Claude->>Claude: translate marks, rewrite brief
+    Claude->>Models: generate next round
+    Models-->>Claude: file and cost
+    Claude->>Models: critic checks it
+    Claude->>Studio: push next round
+    You->>Studio: accept
+```
+
+The critic's translate mode turns your drawn annotations and timeline
+markers into region-anchored instructions for the next prompt, so a note
+pinned on the logo's left eye becomes a specific fix rather than a vague
+"fix the eye". Session state is saved in
+`~/.cache/clouter/studio/<id>/` (`session.json`, `rounds/`, `uploads/`),
+so closing the tab and coming back later picks up where you left off.
 
 ## Install
 
