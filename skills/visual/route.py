@@ -56,9 +56,15 @@ import catalogue  # noqa: E402
 import ranking  # noqa: E402
 
 PREFILTER = re.compile(
-    r"\b(image|images|picture|pictures|illustration|illustrations|logo|logos|icon|icons|"
-    r"svg|vector|render|rendering|banner|banners|poster|posters|video|videos|clip|clips|"
-    r"animation|animations|voice|voices|speech|narrate|narration|tts|audio)\b",
+    r"\b(image|images|pictures|illustration|illustrations|logo|logos|icon|icons|"
+    r"svg|vector|banner|banners|poster|posters|video|videos|clip|clips|"
+    r"animation|animations|voice|voices|speech|narrate|narration|tts|audio|"
+    r"artwork|graphic|graphics)\b"
+    # phrase-restricted: bare "picture"/"render" alone are too common outside
+    # visual requests ("the big picture", "React render loop"), so these two
+    # only count with the words that actually ask for a new file.
+    r"|\bpictures?\s+of\b"
+    r"|\brender(?:ing)?\s+(?:a|an|me|us|this)\b",
     re.IGNORECASE,
 )
 SYSTEM_EVENT = re.compile(r"^\s*<(task-notification|system-reminder)\b")
@@ -293,9 +299,13 @@ def main():
         if not keys.find("OPENROUTER_API_KEY"):
             emit("[clouter visual] This prompt may ask for an image, video or speech file, which "
                  "an OpenRouter model could make, but no OpenRouter key is stored. Ask once with "
-                 "AskUserQuestion whether to store one now (run: python3 \""
-                 + os.path.join(HERE, "setup-key.py") + "\", which opens the browser) or to "
-                 "carry on without; on \"without\" do not ask again this session.")
+                 "AskUserQuestion whether to store one now or carry on without; \"without\" only "
+                 "means no nudge on ordinary prompts this session — offer again once if the user "
+                 "later explicitly asks to generate a file, or if generate.py or critique.py "
+                 "exits 3. To store one, run python3 \"" + os.path.join(HERE, "setup-key.py") +
+                 "\" in the background and show the user both links from its stderr JSON line: "
+                 "the url to open, and the paste_url for a machine the browser can't reach "
+                 "(WSL2, remote). /clouter:visual setup does the same later.")
             return 0
         text = route(prompt, started)
         if text:

@@ -310,18 +310,33 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/visual/setup-key.py"
 
 It opens the browser on OpenRouter's OAuth page, takes the callback on
 127.0.0.1, checks the key and stores it in `~/.config/clouter/credentials`
-(mode 0600). If the browser cannot reach this machine (a Windows browser
-outside WSL, a remote box), the same run serves a paste page whose URL is
-on its stderr; `--tty` reads a hidden prompt instead. Nothing prints the
-key. After that no session asks again: the tier router, the visual hook and
-the generator all read the same file, and `OPENROUTER_API_KEY` in the
-environment wins over it.
+(mode 0600). Run it in the background and show the user both links from its
+stderr JSON line: `url` (open in a browser) and `paste_url` (the fallback
+when the browser can't reach this machine — a Windows browser outside WSL,
+a remote box; the same run serves a paste page at that URL). Use `--tty`
+instead when there is no browser to open at all (a headless box, an SSH
+session) — it reads a hidden prompt. Nothing prints the key. After that no
+session asks again: the tier router, the visual hook and the generator all
+read the same file, and `OPENROUTER_API_KEY` in the environment wins over
+it — set that instead of running setup on a machine where storing a file
+is unwelcome.
 
 When a prompt looks visual and no key is stored, the hook injects a short
 note instead of a list. Ask once with `AskUserQuestion` whether to store a
-key now or carry on without; on "without", do not ask again this session.
+key now or carry on without. "Without" only silences the hook's own nudge
+on ordinary prompts, for this session; if the user later explicitly asks to
+generate a file, or a generate.py/critique.py run exits 3 (see "Errors"),
+offer the setup again — once per such request, with `/clouter:visual
+setup` as the thing to run.
 
 # Errors
+
+Exit 3 (no OpenRouter key found, or the credentials file has an unsafe mode)
+from generate.py or critique.py means nothing was sent yet. Offer
+`/clouter:visual setup` with `AskUserQuestion` (see "Setup, once"); on
+"without" carry on unable to make that file, and don't ask again for this
+same request. `OPENROUTER_API_KEY` in the environment is the alternative to
+running setup at all.
 
 Exit 6 from generate.py (model unusable: HTTP 403 upstream, e.g. an 18+
 attestation the account lacks) prints the upstream message to the user in one
