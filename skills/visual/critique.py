@@ -7,6 +7,12 @@ fix what's wrong, for up to --rounds tries.
                 [--rounds N] [--critic <model id>] [--aspect 16:9] [--transparent]
                 [--defects-file <path>] [--tried <id,id,...>]
                 [--request <text> | --request-file <path>]
+    critique.py <file> (--prompt <text> | --prompt-file <path>) --suggest --out <defects.json>
+                [--critic <model id>] [--request <text> | --request-file <path>]
+    critique.py <file> --translate --out <instructions.json>
+                [--annotation <layer.png>] [--notes-file <json>] [--text-file <path>]
+                [--frames-file <json>] [--critic <model id>]
+                [--request <text> | --request-file <path>]
 
 <file> is the image or SVG generate.py already wrote (video and speech
 files are refused: critique only judges images/svg). The critic (default
@@ -35,8 +41,10 @@ file as --reference when catalogue.reference_supported(--model) says the
 model takes one, otherwise a plain regeneration from the fix prompt.
 Each new file is written next to the original as <stem>.rN.<ext>, judged
 in turn. Once a file passes, or --rounds is used up, the final file is
-the passing one, else the lowest-scored one seen (a fix can make things
-worse); ties go to the later file.
+chosen from every judged file, the original (or its seeded result)
+included: a passing file first, else the lowest score (sum of
+severities; a fix can make things worse), ties going to the earliest
+file. Any escalation command starts from that chosen file.
 
 Also importable:
 
@@ -73,6 +81,31 @@ swap in a chosen model id. Any failure building it (no key, Jev,
 catalogue, no candidates) is never raised: it sets "escalation_error"
 instead, the same way a critic failure never fails generate.py.
 
+--suggest (the studio's critic suggestions) judges <file> once, never
+calls a generator and never builds an escalation, and writes
+{"defects": [...]} to --out: each defect keeps type/where/box/severity/fix
+and gains a stable id "d1", "d2", ... in the critic's order.
+
+--translate (the studio's feedback) sends the vision critic the clean
+<file>; the pen layer --annotation alpha-composited over it (through
+lib/png.py, the layer scaled to the image when sizes differ), or sent as
+a separate image when <file> isn't a PNG (JPEG, WebP, an SVG with no
+browser to rasterise it; a rasterised SVG is composited like a PNG); the
+note pins from --notes-file ([{n, x, y, text}], x/y 0-1 fractions, or
+{"notes": [...]}); the user's text from --text-file; and for video or
+audio the markers from --frames-file ([{t, text, frame}] with frame an
+image path or null, or {"markers": [...]}), each captured frame sent as
+an image. <file> may then be the video or audio itself: it is not sent,
+only the frames are. At least one of the four inputs is required. The
+critic answers {"instructions": [{"where", "box", "instruction",
+"source": pen|note|text|marker}]}, written to --out plus "cost".
+
+Both print {"out": path, "cost": USD or null, "critic": model id} on
+stdout. Also importable: suggest(path, prompt, critic=None, key=None,
+request=None) and translate_annotations(image_path, annotation_png,
+notes, text, request=None, critic=None, key=None, frames=None), each
+returning the written JSON plus "cost" and "critic".
+
 Every critic call is logged through generate.log_generation with
 modality "critique"; every fix generation is logged the same way
 generate.py logs one, under "raster_image" or "vector_svg".
@@ -95,7 +128,7 @@ import tempfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
 sys.path.insert(0, HERE)
-from lib import keys  # noqa: E402
+from lib import keys, png  # noqa: E402
 import catalogue  # noqa: E402
 import generate  # noqa: E402
 import preview  # noqa: E402
@@ -275,25 +308,35 @@ def build_content(path, prompt, request=None):
     else:
         text = CRITIC_USER_TEMPLATE.format(prompt=prompt)
     content = [{"type": "text", "text": text}]
+    raw, media_type, svg_text = image_for_critic(path)
+    if raw is not None:
+        content.append(image_part(raw, media_type))
+    else:
+        content[0]["text"] += (
+            "\n\nNo headless browser was available to rasterise it, so here is the "
+            "SVG source (markup, not prose) instead:\n\n" + svg_text
+        )
+    return content
+
+
+def image_for_critic(path):
+    """(raw, media_type, None) for what the critic should see of path: a
+    raster file's own bytes, or an SVG rasterised to PNG. (None, None,
+    svg_source) for an SVG when no browser is available to rasterise it."""
     if ext_kind(path) == "vector_svg":
         png_bytes = rasterize_svg(path)
         if png_bytes is not None:
-            url = preview.data_url("critique.png", png_bytes)
-            content.append({"type": "image_url", "image_url": {"url": url}})
-        else:
-            with open(path, "r", encoding="utf-8", errors="replace") as f:
-                svg_text = f.read()
-            content[0]["text"] += (
-                "\n\nNo headless browser was available to rasterise it, so here is the "
-                "SVG source (markup, not prose) instead:\n\n" + svg_text
-            )
-    else:
-        with open(path, "rb") as f:
-            raw = f.read()
-        media_type = generate.sniff_media_type(path, raw) or "image/png"
-        url = f"data:{media_type};base64,{base64.b64encode(raw).decode()}"
-        content.append({"type": "image_url", "image_url": {"url": url}})
-    return content
+            return png_bytes, "image/png", None
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            return None, None, f.read()
+    with open(path, "rb") as f:
+        raw = f.read()
+    return raw, generate.sniff_media_type(path, raw) or "image/png", None
+
+
+def image_part(raw, media_type):
+    url = f"data:{media_type};base64,{base64.b64encode(raw).decode()}"
+    return {"type": "image_url", "image_url": {"url": url}}
 
 
 # --- one critic call ---------------------------------------------------------------
@@ -304,11 +347,21 @@ def judge(path, prompt, critic, key, request=None):
     it alongside prompt and is told the request wins where they differ.
     Raises CritiqueParseError after a second unparseable reply."""
     system = CRITIC_SYSTEM + (REQUEST_SYSTEM_ADDENDUM if request else "")
+    parsed, cost = ask_critic(critic, key, system, build_content(path, prompt, request), path)
+    defects = [d for d in (parsed.get("defects") or []) if isinstance(d, dict)]
+    passed = not any((d.get("severity") or 0) >= 3 for d in defects)
+    return {"pass": passed, "defects": defects, "cost": cost}
+
+
+def ask_critic(critic, key, system, content, log_path):
+    """One strict-JSON chat call to the critic: (parsed dict, cost). The
+    call is logged against log_path with modality "critique". Raises
+    CritiqueParseError after a second unparseable reply."""
     body = {
         "model": critic,
         "messages": [
             {"role": "system", "content": system},
-            {"role": "user", "content": build_content(path, prompt, request)},
+            {"role": "user", "content": content},
         ],
         "response_format": {"type": "json_object"},
         "temperature": 0,
@@ -320,11 +373,9 @@ def judge(path, prompt, critic, key, request=None):
         text = ((choices[0].get("message") or {}).get("content") if choices else "") or ""
         parsed = parse_critic_json(text)
         if parsed is not None:
-            defects = [d for d in (parsed.get("defects") or []) if isinstance(d, dict)]
             cost = generate.cost_of(answer.get("usage"))
-            generate.log_generation(path, critic, "critique", cost)
-            passed = not any((d.get("severity") or 0) >= 3 for d in defects)
-            return {"pass": passed, "defects": defects, "cost": cost}
+            generate.log_generation(log_path, critic, "critique", cost)
+            return parsed, cost
     raise CritiqueParseError(f"{critic} did not answer with parseable JSON, even after a retry")
 
 
@@ -448,6 +499,181 @@ def build_escalation(prompt, gen_model, modality, final_path, defects, tried, ro
             "command": " ".join(parts)}
 
 
+def check_judgeable(path):
+    """path's kind ('raster_image' or 'vector_svg'); raises ValueError for a
+    missing file or one critique can't judge (video, speech, unknown)."""
+    if not os.path.isfile(path):
+        raise ValueError(f"{path} not found")
+    kind = ext_kind(path)
+    if kind is None:
+        ext = os.path.splitext(path)[1].lower()
+        if ext in UNSUPPORTED_EXTENSIONS:
+            raise ValueError(f"critique only judges images and SVGs, not {UNSUPPORTED_EXTENSIONS[ext]} ({path})")
+        raise ValueError(f"unrecognised file type for critique: {path}")
+    return kind
+
+
+SUGGESTION_FIELDS = ("type", "where", "box", "severity", "fix")
+
+
+def suggest(path, prompt, critic=None, key=None, request=None):
+    """Judge path once, for the studio's critic suggestions: never calls a
+    generator and never builds an escalation. Returns {"defects": [...],
+    "cost": float|None, "critic": id}, each defect keeping only
+    SUGGESTION_FIELDS plus a stable id "d1", "d2", ... in the critic's
+    order. Raises like run()."""
+    check_judgeable(path)
+    critic = critic or os.environ.get("CLOUTER_CRITIC") or DEFAULT_CRITIC
+    if key is None:
+        key = keys.get("OPENROUTER_API_KEY")  # raises MissingKey/UnsafeFile
+    result = judge(path, prompt, critic, key, request)
+    defects = [dict({"id": f"d{i + 1}"}, **{k: d.get(k) for k in SUGGESTION_FIELDS})
+               for i, d in enumerate(result["defects"])]
+    return {"defects": defects, "cost": result["cost"], "critic": critic}
+
+
+# --- studio: translating the user's annotations into generator instructions --------
+
+INSTRUCTION_SOURCES = ("pen", "note", "text", "marker")
+
+TRANSLATE_SYSTEM = f"""You turn a user's feedback on a generated image, video or audio clip into precise edit
+instructions for the generator. Reply with JSON only, matching exactly this schema. No prose, no code fences:
+
+{{"instructions": [{{"where": "short description of the place", "box": [x0, y0, x1, y1] normalised 0-1 or null, "instruction": "imperative instruction for the generator", "source": one of {list(INSTRUCTION_SOURCES)!r}}}]}}
+
+What you may be given:
+- the clean image, as generated;
+- the same image with the user's pen strokes drawn on top, or (when compositing wasn't possible) the pen
+  layer alone on a transparent background, at the image's own proportions (source "pen");
+- numbered note pins, each at an x/y position given as 0-1 fractions of the image (source "note");
+- the user's free text (source "text");
+- for video or audio, timestamped markers, with the captured video frame when there is one (source "marker").
+
+Rules: one instruction per distinct change the user asks for. Read pen marks for what they point at —
+a circle, a cross, an arrow, a scribble over something — and describe the target by what it depicts, never
+as "the red circle": the strokes themselves are never part of the wanted result. box localises the change
+on the clean image (for a marker, on its frame), or null when it can't be localised. For a marker, say its
+timestamp in where. Each instruction must stand on its own, without the annotations. Do not invent changes
+the user didn't ask for, and do not add taste or style preferences of your own."""
+
+
+def _scaled_row(layer_rows, lw, lh, width, height, y):
+    """Row y of the layer scaled (nearest neighbour) to width x height."""
+    src = layer_rows[min(lh - 1, y * lh // height)]
+    if lw == width:
+        return src
+    out = bytearray(width * 4)
+    for x in range(width):
+        sx = min(lw - 1, x * lw // width) * 4
+        out[x * 4:x * 4 + 4] = src[sx:sx + 4]
+    return out
+
+
+def composite_png(base_raw, layer_raw):
+    """PNG bytes of base_raw with layer_raw alpha-composited on top (source
+    over), the layer scaled to the base's size when the two differ. Raises
+    png.PngError when either can't be decoded."""
+    width, height, rows = png.decode(base_raw)
+    lw, lh, layer_rows = png.decode(layer_raw)
+    out_rows = []
+    for y in range(height):
+        row = bytearray(rows[y])
+        layer = _scaled_row(layer_rows, lw, lh, width, height, y)
+        for i in range(3, width * 4, 4):
+            la = layer[i]
+            if la == 0:
+                continue
+            ba = row[i]
+            out_a = la + ba * (255 - la) // 255
+            for c in range(i - 3, i):
+                row[c] = (layer[c] * la * 255 + row[c] * ba * (255 - la)) // (out_a * 255)
+            row[i] = out_a
+        out_rows.append(row)
+    return png.encode(width, height, out_rows)
+
+
+def _read_frame(frame_path):
+    with open(frame_path, "rb") as f:
+        raw = f.read()
+    return image_part(raw, generate.sniff_media_type(frame_path, raw) or "image/png")
+
+
+def translate_annotations(image_path, annotation_png, notes, text, request=None, critic=None,
+                          key=None, frames=None):
+    """Translate the studio's feedback on image_path into generator
+    instructions through the vision critic. annotation_png is the pen
+    layer (RGBA PNG path) or None; notes a list of {n, x, y, text} pins
+    (x/y 0-1 fractions); text the user's free text; frames, for video or
+    audio, a list of {t, text, frame} markers (frame an image path or
+    None). request, when given, is the user's original request, verbatim.
+    For a raster or SVG image_path the critic sees the clean image plus
+    the pen layer composited on top of it, or the layer as a separate
+    image when the clean image isn't a PNG (or compositing fails). Returns
+    {"instructions": [...], "cost": float|None, "critic": id}. Raises
+    ValueError for missing files, keys.MissingKey/UnsafeFile,
+    generate.ApiError or CritiqueParseError like run()."""
+    if not os.path.isfile(image_path):
+        raise ValueError(f"{image_path} not found")
+    if annotation_png and not os.path.isfile(annotation_png):
+        raise ValueError(f"{annotation_png} not found")
+    notes = [n for n in (notes or []) if isinstance(n, dict)]
+    frames = [m for m in (frames or []) if isinstance(m, dict)]
+    for m in frames:
+        if m.get("frame") and not os.path.isfile(m["frame"]):
+            raise ValueError(f"{m['frame']} not found")
+    critic = critic or os.environ.get("CLOUTER_CRITIC") or DEFAULT_CRITIC
+    if key is None:
+        key = keys.get("OPENROUTER_API_KEY")  # raises MissingKey/UnsafeFile
+
+    lines = []
+    if request:
+        lines += [REQUEST_LABEL, "", request, ""]
+    images = []
+    if ext_kind(image_path) is not None:
+        raw, media_type, svg_text = image_for_critic(image_path)
+        if raw is not None:
+            lines.append("Image 1 is the clean image, as generated.")
+            images.append(image_part(raw, media_type))
+        else:
+            lines += ["No headless browser was available to rasterise the clean image, so here is its "
+                      "SVG source (markup, not prose):", "", svg_text, ""]
+        if annotation_png:
+            with open(annotation_png, "rb") as f:
+                layer_raw = f.read()
+            composite = None
+            if media_type == "image/png":
+                try:
+                    composite = composite_png(raw, layer_raw)
+                except ValueError:  # png.PngError: a PNG lib/png.py can't read
+                    composite = None
+            if composite is not None:
+                lines.append(f"Image {len(images) + 1} is the same image with the user's pen strokes drawn on top.")
+                images.append(image_part(composite, "image/png"))
+            else:
+                lines.append(f"Image {len(images) + 1} is the user's pen layer alone, on a transparent "
+                             "background, to be laid over the clean image at the same proportions.")
+                images.append(image_part(layer_raw, "image/png"))
+    if notes:
+        lines += ["", "Note pins (x/y are 0-1 fractions of the image width/height):"]
+        for i, n in enumerate(notes):
+            lines.append(f"{n.get('n', i + 1)}. at x={n.get('x')}, y={n.get('y')}: {n.get('text') or ''}")
+    if frames:
+        lines += ["", "Timeline markers:"]
+        for m in frames:
+            line = f"- at {m.get('t')}s: {m.get('text') or ''}"
+            if m.get("frame"):
+                images.append(_read_frame(m["frame"]))
+                line += f" (captured frame: image {len(images)})"
+            lines.append(line)
+    lines += ["", "The user's text:", "", (text or "").strip() or "(none)", "",
+              "Reply with the JSON object described in your instructions, and nothing else."]
+
+    content = [{"type": "text", "text": "\n".join(lines)}] + images
+    parsed, cost = ask_critic(critic, key, TRANSLATE_SYSTEM, content, image_path)
+    instructions = [i for i in (parsed.get("instructions") or []) if isinstance(i, dict)]
+    return {"instructions": instructions, "cost": cost, "critic": critic}
+
+
 def run(path, prompt, gen_model, rounds=2, critic=None, key=None, aspect=None, transparent=False,
         initial_defects=None, tried=None, request=None, params=None, endpoint="auto"):
     """Judge path against prompt, fixing through gen_model for up to
@@ -464,15 +690,7 @@ def run(path, prompt, gen_model, rounds=2, critic=None, key=None, aspect=None, t
     (bad args / missing file / unsupported type), keys.MissingKey/
     UnsafeFile (no key), generate.ApiError or catalogue.CatalogueError (API
     failure), or CritiqueParseError (unparseable critic reply)."""
-    if not os.path.isfile(path):
-        raise ValueError(f"{path} not found")
-    kind = ext_kind(path)
-    if kind is None:
-        ext = os.path.splitext(path)[1].lower()
-        if ext in UNSUPPORTED_EXTENSIONS:
-            raise ValueError(f"critique only judges images and SVGs, not {UNSUPPORTED_EXTENSIONS[ext]} ({path})")
-        raise ValueError(f"unrecognised file type for critique: {path}")
-
+    kind = check_judgeable(path)
     critic = critic or os.environ.get("CLOUTER_CRITIC") or DEFAULT_CRITIC
     if key is None:
         key = keys.get("OPENROUTER_API_KEY")  # raises MissingKey/UnsafeFile
@@ -522,13 +740,12 @@ def run(path, prompt, gen_model, rounds=2, critic=None, key=None, aspect=None, t
         current_path = new_path
         judged.append((current_path, current_result))
 
-    if current_result["pass"]:
-        final_path, final_result = current_path, current_result
-    else:
-        final_path, final_result = judged[0]
-        for candidate_path, candidate_result in judged[1:]:
-            if score(candidate_result) <= score(final_result):
-                final_path, final_result = candidate_path, candidate_result
+    # Every judged file competes, the original (or its seeded result)
+    # included: a passing file beats any failing one, then the lowest score
+    # wins, and a tie goes to the earliest file, since a fix round that
+    # didn't improve anything shouldn't displace what came before it.
+    best = min(range(len(judged)), key=lambda i: (not judged[i][1]["pass"], score(judged[i][1]), i))
+    final_path, final_result = judged[best]
 
     result = {
         "final": final_path,
@@ -549,14 +766,44 @@ def run(path, prompt, gen_model, rounds=2, critic=None, key=None, aspect=None, t
     return result
 
 
+def _read_json_arg(path, parser, flag, key):
+    """A JSON list from a --<flag> file: the list itself, or the `key` list
+    of an object holding one. Errors through parser.error."""
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            value = json.load(f)
+    except (OSError, ValueError) as e:
+        parser.error(f"cannot read --{flag} {path}: {e}")
+    if isinstance(value, dict):
+        value = value.get(key)
+    if not isinstance(value, list):
+        parser.error(f"--{flag} {path} must be a JSON list, or an object with a \"{key}\" list")
+    return value
+
+
+def _write_out(path, obj):
+    directory = os.path.dirname(path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(obj, f, indent=2)
+
+
 def main(argv):
     parser = argparse.ArgumentParser(
         description="Judge a generated image with a vision-model critic, and fix defects it finds.")
     parser.add_argument("file")
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument("--suggest", action="store_true",
+                            help="judge once and write the defects, with ids, to --out (no fix rounds)")
+    mode_group.add_argument("--translate", action="store_true",
+                            help="turn studio annotations on <file> into generator instructions in --out")
+    parser.add_argument("--out", help="--suggest/--translate: path of the JSON file to write")
     prompt_group = parser.add_mutually_exclusive_group()
     prompt_group.add_argument("--prompt", help="the original generation prompt")
     prompt_group.add_argument("--prompt-file", help="path to a file holding the prompt text")
-    parser.add_argument("--model", required=True, help="the generator model id (for fix rounds)")
+    parser.add_argument("--model", help="the generator model id (for fix rounds; required unless "
+                        "--suggest or --translate)")
     parser.add_argument("--rounds", type=int, default=2, help="max fix rounds (0: judge only, default 2)")
     parser.add_argument("--critic", help="critic model id (default CLOUTER_CRITIC, else the built-in default)")
     parser.add_argument("--aspect", help="aspect ratio such as 16:9, for a fix regeneration")
@@ -565,39 +812,63 @@ def main(argv):
                         " to seed the first judged result, skipping the first critic call")
     parser.add_argument("--tried", help="comma-separated model ids already tried, excluded from "
                         "a fresh escalation's candidates")
+    parser.add_argument("--annotation", help="--translate: the pen layer, an RGBA PNG")
+    parser.add_argument("--notes-file", help="--translate: JSON list of {n, x, y, text} note pins "
+                        "(or {\"notes\": [...]})")
+    parser.add_argument("--text-file", help="--translate: path to a file holding the user's free text")
+    parser.add_argument("--frames-file", help="--translate: JSON list of {t, text, frame} markers "
+                        "(or {\"markers\": [...]})")
     request_group = parser.add_mutually_exclusive_group()
     request_group.add_argument("--request", help="the user's original request, verbatim")
     request_group.add_argument("--request-file", help="path to a file holding the user's original "
                                 "request, verbatim")
     args = parser.parse_args(argv[1:])
+    if (args.suggest or args.translate) and not args.out:
+        parser.error("--out is required with --suggest and --translate")
+    if not args.suggest and not args.translate and not args.model:
+        parser.error("the following arguments are required: --model")
+    if args.request_file:
+        args.request = generate.read_text_arg(args.request_file, parser, "request-file")
+
+    if args.translate:
+        notes = _read_json_arg(args.notes_file, parser, "notes-file", "notes") if args.notes_file else []
+        frames = _read_json_arg(args.frames_file, parser, "frames-file", "markers") if args.frames_file else []
+        text = generate.read_text_arg(args.text_file, parser, "text-file") if args.text_file else ""
+        if not (args.annotation or notes or frames or text.strip()):
+            parser.error("--translate needs at least one of --annotation, --notes-file, "
+                         "--frames-file or a non-empty --text-file")
+        return _cli_call(lambda: translate_annotations(
+            args.file, args.annotation, notes, text, request=args.request, critic=args.critic,
+            frames=frames), args.out, ("instructions", "cost"))
+
     if not args.prompt and not args.prompt_file:
         parser.error("one of the arguments --prompt --prompt-file is required")
     if args.prompt_file:
         args.prompt = generate.read_text_arg(args.prompt_file, parser, "prompt-file")
     if not args.prompt.strip():
         parser.error("--prompt must not be empty")
-    if args.request_file:
-        args.request = generate.read_text_arg(args.request_file, parser, "request-file")
+
+    if args.suggest:
+        return _cli_call(lambda: suggest(args.file, args.prompt, critic=args.critic,
+                                         request=args.request), args.out, ("defects",))
 
     initial_defects = None
     if args.defects_file:
-        try:
-            with open(args.defects_file, "r", encoding="utf-8") as f:
-                raw_defects = json.load(f)
-        except (OSError, ValueError) as e:
-            parser.error(f"cannot read --defects-file {args.defects_file}: {e}")
-        if isinstance(raw_defects, dict):
-            raw_defects = raw_defects.get("defects")
-        if not isinstance(raw_defects, list):
-            parser.error(f"--defects-file {args.defects_file} must be a JSON list, "
-                         "or an object with a \"defects\" list")
-        initial_defects = raw_defects
+        initial_defects = _read_json_arg(args.defects_file, parser, "defects-file", "defects")
     tried = [t.strip() for t in args.tried.split(",") if t.strip()] if args.tried else None
 
+    return _cli_call(lambda: run(args.file, args.prompt, args.model, rounds=args.rounds,
+                                 critic=args.critic, aspect=args.aspect,
+                                 transparent=args.transparent, initial_defects=initial_defects,
+                                 tried=tried, request=args.request))
+
+
+def _cli_call(call, out=None, out_keys=()):
+    """Run call() and map its exceptions to exit codes. With out, the
+    result's out_keys are written there and stdout gets {"out", "cost",
+    "critic"}; without, the whole result goes to stdout."""
     try:
-        result = run(args.file, args.prompt, args.model, rounds=args.rounds, critic=args.critic,
-                     aspect=args.aspect, transparent=args.transparent,
-                     initial_defects=initial_defects, tried=tried, request=args.request)
+        result = call()
     except ValueError as e:
         print(f"critique: {e}", file=sys.stderr)
         return 2
@@ -611,7 +882,15 @@ def main(argv):
         print(f"critique: {e}", file=sys.stderr)
         return 9
 
-    print(json.dumps(result))
+    if out is None:
+        print(json.dumps(result))
+        return 0
+    try:
+        _write_out(out, {k: result[k] for k in out_keys})
+    except OSError as e:
+        print(f"critique: cannot write --out {out}: {e}", file=sys.stderr)
+        return 2
+    print(json.dumps({"out": out, "cost": result["cost"], "critic": result["critic"]}))
     return 0
 
 

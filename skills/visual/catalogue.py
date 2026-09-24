@@ -8,6 +8,9 @@
         m["alpha"],   # raster only: --transparent gives a real alpha channel on this model
         m["reference_supported"]  # raster/vector: --reference works on this model
 
+    $ catalogue.py <modality> [limit]              # the priced list, JSON
+    $ catalogue.py --reference-supported <model id>  # {"model", "reference_supported"}
+
 Modalities: raster_image, vector_svg (both from GET /api/v1/models
 ?output_modalities=image, split on the vector flag), video (GET
 /api/v1/videos/models) and speech (?output_modalities=speech). Live on
@@ -189,9 +192,27 @@ def models(modality, timeout=10.0):
 
 
 def main(argv):
-    """`catalogue.py <modality> [limit]` prints the list as JSON, for a look."""
+    """`catalogue.py <modality> [limit]` prints the list as JSON, for a look.
+    `catalogue.py --reference-supported <model id>` prints
+    {"model", "reference_supported"} for one arbitrary model id (exit 2 if
+    the id is not in the live image-model listing)."""
+    if len(argv) == 3 and argv[1] == "--reference-supported":
+        model_id = argv[2]
+        try:
+            found = _get("/api/v1/models?output_modalities=image", 10.0)
+        except CatalogueError as e:
+            print(f"catalogue: {e}", file=sys.stderr)
+            return 4
+        for model in found:
+            if model.get("id") == model_id:
+                json.dump({"model": model_id, "reference_supported": reference_supported(model_id, _input_modalities(model))}, sys.stdout)
+                print()
+                return 0
+        print(f"catalogue: unknown model id {model_id!r}", file=sys.stderr)
+        return 2
     if len(argv) < 2 or argv[1] not in MODALITIES:
         print(f"usage: catalogue.py {{{'|'.join(MODALITIES)}}} [limit]", file=sys.stderr)
+        print("       catalogue.py --reference-supported <model id>", file=sys.stderr)
         return 2
     limit = int(argv[2]) if len(argv) > 2 else None
     try:

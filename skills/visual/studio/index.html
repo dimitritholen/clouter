@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Clouter studio</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='6' fill='%233b6fe0'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/studio.css">
+</head>
+<body>
+<header class="header">
+  <h1 class="header-title">Clouter studio</h1>
+  <div class="header-meta">
+    <span id="header-request" class="header-request" title=""></span>
+    <span id="header-modality" class="badge"></span>
+    <span id="header-state" class="badge"></span>
+    <span class="conn" title="Connection status">
+      <span id="conn-dot" class="conn-dot" aria-hidden="true"></span>
+      <span id="conn-label" class="conn-label">connecting…</span>
+    </span>
+  </div>
+</header>
+
+<div id="error-banner" class="error-banner" hidden role="alert"></div>
+
+<main class="layout">
+  <nav class="history" aria-label="Rounds">
+    <div id="history-strip" class="history-strip"></div>
+    <button id="new-round-pill" class="pill" type="button" hidden>New round available</button>
+  </nav>
+
+  <section class="main-view" aria-label="Selected round">
+    <div id="round-meta" class="round-meta"></div>
+    <div id="media-view" class="media-view"></div>
+    <details id="brief-details" class="brief-details">
+      <summary>Brief used for this round</summary>
+      <p id="brief-text"></p>
+    </details>
+
+    <section id="defects-section" class="defects-section" hidden>
+      <h2>Critic suggestions</h2>
+      <ul id="defects-list" class="defects-list"></ul>
+    </section>
+
+    <section class="annotation-section" id="annotation-section" hidden>
+      <button id="annotate-btn" type="button" class="btn">Annotate</button>
+      <div id="annotation-preview" class="annotation-preview" hidden></div>
+    </section>
+
+    <div id="timeline-mount" class="timeline-mount"></div>
+
+    <section class="feedback-section">
+      <label for="feedback-text">Feedback</label>
+      <textarea id="feedback-text" rows="4" placeholder="What should change?"></textarea>
+
+      <div class="actions">
+        <label class="branch-toggle" id="branch-toggle-wrap" hidden>
+          <input type="checkbox" id="branch-toggle">
+          Branch from this round
+        </label>
+        <button id="send-feedback-btn" type="button" class="btn btn-primary">Send feedback</button>
+        <button id="accept-btn" type="button" class="btn">Accept this round</button>
+      </div>
+      <p id="working-banner" class="working-banner" hidden></p>
+      <p id="accepted-banner" class="accepted-banner" hidden></p>
+    </section>
+  </section>
+</main>
+
+<script src="/static/app.js"></script>
+<script src="/static/editor.js" defer></script>
+<script src="/static/timeline.js" defer></script>
+</body>
+</html>

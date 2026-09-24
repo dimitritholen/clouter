@@ -120,14 +120,41 @@ def write_request_file(prompt):
 def context(prompt, picks, transparent=False, request_path=None):
     """picks: [(modality, ranked, recommended)], likeliest modality first."""
     generate = os.path.join(HERE, "generate.py")
+    critique = os.path.join(HERE, "critique.py")
+    studio = os.path.join(HERE, "studio.py")
     request_flag = f" --request-file {shlex.quote(request_path)}" if request_path else ""
 
     def command(modality):
         extra = " --transparent" if transparent and modality == "raster_image" else ""
         return (f"python3 \"{generate}\" --model <chosen id> --modality {modality} "
-                f"--prompt-file <path to the design brief>{extra}{request_flag} "
-                "[--out <path named in the prompt>] "
-                "(raster/vector: always followed by a critique pass, can take several minutes)")
+                f"--prompt-file <path to the design brief>{extra}{request_flag} --no-critique "
+                "[--out <path named in the prompt>]")
+
+    def studio_steps(modality):
+        """The push+wait tail after generate.py: judge-only suggest for raster/vector,
+        then push the round into the studio and wait for the user, in the background.
+        The loop itself (feedback vs accept vs timeout vs server gone) lives in SKILL.md,
+        not here."""
+        visual = modality in ("raster_image", "vector_svg")
+        suggest = (f"; python3 \"{critique}\" <file> --prompt-file <path to the design brief> "
+                   "--suggest --out <defects.json>") if visual else ""
+        defects = " --defects-file <defects.json>" if visual else ""
+        push = (f"python3 \"{studio}\" push --file <file> --model <chosen id> --cost <cost> "
+                f"--brief-file <path to the design brief> --request-file <path> "
+                f"--modality {modality}{defects}")
+        return (f"{suggest}; then {push}; then `studio.py wait --session <dir>` in the "
+                "background and follow the \"Studio loop\" section of SKILL.md")
+
+    def studio_steps_generic():
+        """Same tail as studio_steps(), worded for the multi-format block where the
+        modality varies per question rather than being known up front."""
+        return (f"; for raster_image/vector_svg formats also run python3 \"{critique}\" "
+                "<file> --prompt-file <brief> --suggest --out <defects.json>; then run "
+                f"python3 \"{studio}\" push --file <file> --model <chosen id> --cost <cost> "
+                "--brief-file <brief> --request-file <path> --modality <its --modality> "
+                "(--defects-file <defects.json> for raster/vector); then run `studio.py wait "
+                "--session <dir>` per push in the background and follow the \"Studio loop\" "
+                "section of SKILL.md")
 
     brief_instruction = (
         "Turn the request into a design brief (subject, hierarchy, style, colours, "
@@ -145,9 +172,8 @@ def context(prompt, picks, transparent=False, request_path=None):
         ]
         lines += options(ranked, recommended)
         lines.append(
-            f"On a model choice, {brief_instruction} Then run: {command(modality)}, and "
-            "report the path and cost it prints, plus the brief itself so the user can "
-            "correct it. On \"Stay with Claude\" carry on as usual. "
+            f"On a model choice, {brief_instruction} Then: run {command(modality)}"
+            f"{studio_steps(modality)}. On \"Stay with Claude\" carry on as usual. "
             "Do not ask twice for the same prompt."
         )
         return "\n".join(lines)
@@ -164,11 +190,11 @@ def context(prompt, picks, transparent=False, request_path=None):
     raster_hint = (" (--transparent on the raster_image run)"
                    if transparent and any(m == "raster_image" for m, _, _ in picks) else "")
     lines.append(
-        f"For every question answered with a model, {brief_instruction} Then run: "
+        f"For every question answered with a model, {brief_instruction} Then, per format: run "
         f"{command('<its --modality>')}{raster_hint}, one run per format, each with its own "
-        "--out when the prompt names paths; then report every path and cost printed, plus "
-        "each brief so the user can correct it. A question answered \"Stay with Claude\" "
-        "means Claude makes that format by hand. Do not ask twice for the same prompt."
+        f"--out when the prompt names paths{studio_steps_generic()}. A question answered "
+        "\"Stay with Claude\" means Claude makes that format by hand. "
+        "Do not ask twice for the same prompt."
     )
     return "\n".join(lines)
 
