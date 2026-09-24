@@ -13,7 +13,7 @@ trap 'rm -rf "$work"; [ -n "${server_pid:-}" ] && kill "$server_pid" 2>/dev/null
 # Stand-in for /api/alpha/decisions and /v1/systemone: answers every
 # question by its type, appends each request to requests.jsonl, returns 500
 # while the state says "boom", and 500 once then 200 when it says "flaky".
-python3 - "$work" <<'EOF_SERVER' &
+python3 - "$work" <<'EOF_SERVER' 2>"$work/server.err" &
 import json, sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -64,8 +64,8 @@ open(f"{work}/port", "w").write(str(server.server_port))
 server.serve_forever()
 EOF_SERVER
 server_pid=$!
-for _ in $(seq 50); do [ -s "$work/port" ] && break; sleep 0.1; done
-[ -s "$work/port" ] || { printf 'FAIL stand-in server did not start\n'; exit 1; }
+for _ in $(seq 300); do [ -s "$work/port" ] && break; sleep 0.1; done
+[ -s "$work/port" ] || { printf 'FAIL stand-in server did not start: %s\n' "$(tr "\n" " " < "$work/server.err" 2>/dev/null)"; exit 1; }
 base="http://127.0.0.1:$(cat "$work/port")"
 
 export CLOUTER_CREDENTIALS="$work/credentials"

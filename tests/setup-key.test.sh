@@ -16,7 +16,7 @@ GOOD_KEY="sk-or-v1-testsecret0123456789"
 # Stand-in OpenRouter: POST /api/v1/auth/keys checks the code and that the
 # verifier hashes to the challenge the test read from the auth URL; GET
 # /api/v1/key accepts only GOOD_KEY. Every request lands in requests.jsonl.
-python3 - "$work" "$GOOD_KEY" <<'EOF_SERVER' &
+python3 - "$work" "$GOOD_KEY" <<'EOF_SERVER' 2>"$work/server.err" &
 import base64, hashlib, json, os, sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -68,8 +68,8 @@ open(f"{work}/port", "w").write(str(server.server_port))
 server.serve_forever()
 EOF_SERVER
 server_pid=$!
-for _ in $(seq 50); do [ -s "$work/port" ] && break; sleep 0.1; done
-[ -s "$work/port" ] || { printf 'FAIL stand-in server did not start\n'; exit 1; }
+for _ in $(seq 300); do [ -s "$work/port" ] && break; sleep 0.1; done
+[ -s "$work/port" ] || { printf 'FAIL stand-in server did not start: %s\n' "$(tr "\n" " " < "$work/server.err" 2>/dev/null)"; exit 1; }
 export OPENROUTER_BASE_URL="http://127.0.0.1:$(cat "$work/port")"
 export CLOUTER_CREDENTIALS="$work/credentials"
 unset OPENROUTER_API_KEY BROWSER

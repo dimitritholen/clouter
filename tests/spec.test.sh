@@ -66,7 +66,7 @@ check_eq "tts: response_format defaults to pcm" "$(printf '%s' "$out" | jq -r '.
 # --- CLI against a stand-in server ---
 mkdir -p "$work/route"
 cp "$FIXTURES/google__veo-3.1.txt" "$work/route/google__veo-3.1.txt"
-python3 - "$work" <<'EOF_SERVER' &
+python3 - "$work" <<'EOF_SERVER' 2>"$work/server.err" &
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 work = sys.argv[1]
@@ -96,8 +96,8 @@ open(f"{work}/port", "w").write(str(server.server_port))
 server.serve_forever()
 EOF_SERVER
 server_pid=$!
-for _ in $(seq 50); do [ -s "$work/port" ] && break; sleep 0.1; done
-[ -s "$work/port" ] || { printf 'FAIL stand-in server did not start\n'; exit 1; }
+for _ in $(seq 300); do [ -s "$work/port" ] && break; sleep 0.1; done
+[ -s "$work/port" ] || { printf 'FAIL stand-in server did not start: %s\n' "$(tr "\n" " " < "$work/server.err" 2>/dev/null)"; exit 1; }
 export OPENROUTER_BASE_URL="http://127.0.0.1:$(cat "$work/port")"
 
 run() { out=$("$SCRIPT" "$@" 2>"$work/stderr"); code=$?; }
