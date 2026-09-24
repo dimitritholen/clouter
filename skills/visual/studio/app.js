@@ -126,6 +126,48 @@
     return max;
   }
 
+  function feedback() {
+    return (state.session && state.session.feedback) || [];
+  }
+
+  function feedbackEntriesForRound(round) {
+    return feedback().filter(function (e) { return e.round === round.n; }).sort(function (a, b) {
+      return (a.id || 0) - (b.id || 0);
+    });
+  }
+
+  function latestFeedbackEntry() {
+    var fb = feedback();
+    var latest = null;
+    fb.forEach(function (e) {
+      if (!latest || (e.id || 0) > (latest.id || 0)) latest = e;
+    });
+    return latest;
+  }
+
+  // Feedback entry the server is currently acting on for this round, or null.
+  function pendingFeedbackEntry(round) {
+    var s = state.session;
+    if (!s || s.state !== 'feedback') return null;
+    var latest = latestFeedbackEntry();
+    if (!latest || latest.round !== round.n || latest.action !== 'feedback') return null;
+    return latest;
+  }
+
+  function resolveModelName(id, round) {
+    if (!id) return null;
+    var models = (round && round.models) || [];
+    for (var i = 0; i < models.length; i++) {
+      if (models[i].id === id) return models[i].name;
+    }
+    if (Array.isArray(state.catalogue)) {
+      for (var j = 0; j < state.catalogue.length; j++) {
+        if (state.catalogue[j].id === id) return state.catalogue[j].name;
+      }
+    }
+    return id;
+  }
+
   function isImageType(mediaType) {
     return !!mediaType && mediaType.indexOf('image/') === 0;
   }
@@ -324,11 +366,72 @@
 
   // ---------- messages ----------
 
+  function buildYouBubble(entry, round) {
+    var bubble = document.createElement('div');
+    bubble.className = 'message-bubble message-you';
+    var author = document.createElement('span');
+    author.className = 'message-author';
+    author.textContent = 'You';
+    bubble.appendChild(author);
+
+    if (entry.action === 'accept') {
+      var acceptedP = document.createElement('p');
+      acceptedP.textContent = 'You accepted this round';
+      bubble.appendChild(acceptedP);
+      return bubble;
+    }
+
+    if (entry.text) {
+      var textP = document.createElement('p');
+      textP.textContent = entry.text;
+      bubble.appendChild(textP);
+    }
+
+    if (entry.model) {
+      var modelP = document.createElement('p');
+      modelP.textContent = 'Model for next round: ' + resolveModelName(entry.model, round);
+      bubble.appendChild(modelP);
+    }
+
+    if (entry.accepted_defects && entry.accepted_defects.length) {
+      var wheres = entry.accepted_defects.map(function (id) {
+        var d = (round.defects || []).filter(function (x) { return x.id === id; })[0];
+        return d ? (d.where || id) : id;
+      });
+      var acceptedDefectsP = document.createElement('p');
+      acceptedDefectsP.textContent = 'Accepted suggestions: ' + wheres.join(', ');
+      bubble.appendChild(acceptedDefectsP);
+    }
+
+    var counts = [];
+    if (entry.annotation) counts.push('1 annotation');
+    if (entry.notes && entry.notes.length) {
+      counts.push(entry.notes.length + ' note' + (entry.notes.length === 1 ? '' : 's'));
+    }
+    if (entry.markers && entry.markers.length) {
+      counts.push(entry.markers.length + ' timeline note' + (entry.markers.length === 1 ? '' : 's'));
+    }
+    if (counts.length) {
+      var countsP = document.createElement('p');
+      countsP.textContent = counts.join(', ');
+      bubble.appendChild(countsP);
+    }
+
+    if (entry.branch_from != null) {
+      var branchP = document.createElement('p');
+      branchP.textContent = 'Branch from round ' + entry.branch_from;
+      bubble.appendChild(branchP);
+    }
+
+    return bubble;
+  }
+
   function renderMessages(round) {
     var hasSummary = !!round.summary;
     var hasMessage = !!round.message;
+    var entries = feedbackEntriesForRound(round);
     els.messagesList.innerHTML = '';
-    if (!hasSummary && !hasMessage) {
+    if (!hasSummary && !hasMessage && !entries.length) {
       els.messagesSection.hidden = true;
       return;
     }
@@ -365,6 +468,10 @@
       claude.appendChild(claudeText);
       els.messagesList.appendChild(claude);
     }
+
+    entries.forEach(function (entry) {
+      els.messagesList.appendChild(buildYouBubble(entry, round));
+    });
   }
 
   // ---------- model picker ----------
@@ -407,38 +514,53 @@
     els.modelPicker.hidden = false;
     els.modelOptionsList.innerHTML = '';
 
-    var choice = state.modelChoice[round.n] || null;
-    if (choice && choice.type === 'suggested') {
-      var stillThere = (round.models || []).some(function (m) { return m.id === choice.id; });
-      if (!stillThere) {
-        choice = null;
-        state.modelChoice[round.n] = null;
+    var locked = pendingFeedbackEntry(round);
+
+    var choice;
+    if (locked) {
+      choice = locked.model ? { type: 'sent', id: locked.model, name: resolveModelName(locked.model, round) } : null;
+    } else {
+      choice = state.modelChoice[round.n] || null;
+      if (choice && choice.type === 'suggested') {
+        var stillThere = (round.models || []).some(function (m) { return m.id === choice.id; });
+        if (!stillThere) {
+          choice = null;
+          state.modelChoice[round.n] = null;
+        }
       }
     }
 
     var radioName = 'model-choice-' + round.n;
 
     var keep = addModelOption(radioName, 'keep', 'Keep ' + (round.model || 'current model'), !choice);
-    keep.radio.addEventListener('change', function () {
-      state.modelChoice[round.n] = null;
-    });
+    if (!locked) {
+      keep.radio.addEventListener('change', function () {
+        state.modelChoice[round.n] = null;
+      });
+    }
     els.modelOptionsList.appendChild(keep.el);
 
+    var choiceInModels = false;
     (round.models || []).forEach(function (m) {
       var label = m.name + ' — ' + formatPrice(m.price, m.unit);
-      var selected = !!choice && choice.type === 'suggested' && choice.id === m.id;
+      var selected = !!choice && (choice.type === 'suggested' || choice.type === 'sent') && choice.id === m.id;
+      if (selected) choiceInModels = true;
       var row = addModelOption(radioName, m.id, label, selected, m.probability, m.reference_supported);
-      row.radio.addEventListener('change', function () {
-        state.modelChoice[round.n] = { type: 'suggested', id: m.id, name: m.name };
-      });
+      if (!locked) {
+        row.radio.addEventListener('change', function () {
+          state.modelChoice[round.n] = { type: 'suggested', id: m.id, name: m.name };
+        });
+      }
       els.modelOptionsList.appendChild(row.el);
     });
 
-    if (choice && choice.type === 'manual') {
+    if (choice && (choice.type === 'manual' || (choice.type === 'sent' && !choiceInModels))) {
       var manualRow = addModelOption(radioName, choice.id, 'Manual: ' + choice.name, true);
-      manualRow.radio.addEventListener('change', function () {
-        state.modelChoice[round.n] = choice;
-      });
+      if (!locked) {
+        manualRow.radio.addEventListener('change', function () {
+          state.modelChoice[round.n] = choice;
+        });
+      }
       els.modelOptionsList.appendChild(manualRow.el);
     }
 
@@ -448,6 +570,7 @@
     var errorForRound = !!modelsRequest && modelsRequest.round === round.n && modelsRequest.status === 'error';
 
     var accepted = s && s.state === 'accepted';
+    els.modelPicker.disabled = !!locked || accepted;
     els.modelSuggestBtn.disabled = pendingForRound || accepted;
     if (pendingForRound) {
       els.modelSuggestStatus.hidden = false;
@@ -729,7 +852,10 @@
     }
     els.defectsSection.hidden = false;
     els.defectsList.innerHTML = '';
-    var acceptedSet = state.acceptedDefects[round.n] || (state.acceptedDefects[round.n] = new Set());
+    var locked = pendingFeedbackEntry(round);
+    var acceptedSet = locked
+      ? new Set(locked.accepted_defects || [])
+      : (state.acceptedDefects[round.n] || (state.acceptedDefects[round.n] = new Set()));
 
     defects.forEach(function (d) {
       var li = document.createElement('li');
@@ -739,10 +865,13 @@
       var cb = document.createElement('input');
       cb.type = 'checkbox';
       cb.checked = acceptedSet.has(d.id);
-      cb.addEventListener('change', function () {
-        if (cb.checked) acceptedSet.add(d.id);
-        else acceptedSet.delete(d.id);
-      });
+      cb.disabled = !!locked;
+      if (!locked) {
+        cb.addEventListener('change', function () {
+          if (cb.checked) acceptedSet.add(d.id);
+          else acceptedSet.delete(d.id);
+        });
+      }
       label.appendChild(cb);
 
       var text = document.createElement('span');
@@ -1067,7 +1196,15 @@
 
     els.workingBanner.hidden = !working;
     if (working) {
-      els.workingBanner.textContent = 'Claude is working on round ' + (newestRoundNumber() + 1) + '…';
+      var nextN = newestRoundNumber() + 1;
+      var round = currentRound();
+      var locked = round ? pendingFeedbackEntry(round) : null;
+      if (locked) {
+        var modelName = locked.model ? resolveModelName(locked.model, round) : (round.model || 'current model');
+        els.workingBanner.textContent = 'Claude is working on round ' + nextN + ' with ' + modelName + '…';
+      } else {
+        els.workingBanner.textContent = 'Claude is working on round ' + nextN + '…';
+      }
     }
 
     els.acceptedBanner.hidden = !accepted;

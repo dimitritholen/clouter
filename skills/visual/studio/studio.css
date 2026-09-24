@@ -510,6 +510,18 @@ textarea {
   background: var(--surface);
 }
 
+.message-bubble.message-you {
+  align-self: flex-end;
+  background: var(--accent);
+  color: var(--accent-text);
+  border-color: var(--accent);
+}
+
+.message-bubble.message-you .message-author {
+  color: var(--accent-text);
+  opacity: 0.8;
+}
+
 .message-bubble .message-trouble {
   margin-top: 4px;
   color: var(--warn);
