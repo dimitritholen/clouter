@@ -234,6 +234,38 @@ def sniff_media_type(path, data):
     return REFERENCE_EXTENSIONS.get(os.path.splitext(path)[1].lower())
 
 
+def svg_add_dimensions(raw):
+    """Recraft's own SVG output (and so, in a critique fix round, our
+    --reference back to it) carries a viewBox but no width/height on the
+    root <svg>, which OpenRouter's validator then rejects as
+    'cannot determine SVG dimensions'. Fill in whichever of width/height
+    is missing from the viewBox's 3rd/4th numbers, on the opening <svg>
+    tag only -- this is for the copy we send as a reference, never for
+    the file on disk."""
+    match = re.search(rb"<svg\b[^>]*>", raw)
+    if not match:
+        return raw
+    tag = match.group(0)
+    # a lookbehind for whitespace, not \b: "-" is a non-word character, so
+    # \b still sits right before "width" in stroke-width= or data-width=.
+    has_width = re.search(rb"(?<=\s)width\s*=", tag)
+    has_height = re.search(rb"(?<=\s)height\s*=", tag)
+    if has_width and has_height:
+        return raw
+    view_box = re.search(
+        rb'viewBox\s*=\s*["\']\s*[-\d.]+[\s,]+[-\d.]+[\s,]+([\d.]+)[\s,]+([\d.]+)', tag)
+    if not view_box:
+        return raw
+    width, height = view_box.group(1), view_box.group(2)
+    addition = b""
+    if not has_width:
+        addition += b' width="%s"' % width
+    if not has_height:
+        addition += b' height="%s"' % height
+    new_tag = tag[:4] + addition + tag[4:]  # "<svg" + attrs + the rest
+    return raw[:match.start()] + new_tag + raw[match.end():]
+
+
 def load_reference(path):
     """Read a --reference file: PNG, JPEG, WebP or SVG by extension or
     magic bytes, refused over MAX_REFERENCE_BYTES before any request.
@@ -248,6 +280,8 @@ def load_reference(path):
     media_type = sniff_media_type(path, raw)
     if not media_type:
         raise ValueError(f"--reference {path} is not a PNG, JPEG, WebP or SVG I can recognise")
+    if media_type == "image/svg+xml":
+        raw = svg_add_dimensions(raw)
     return f"data:{media_type};base64,{base64.b64encode(raw).decode()}"
 
 

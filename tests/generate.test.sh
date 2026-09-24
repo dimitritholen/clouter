@@ -435,6 +435,54 @@ check_eq "--reference over 20 MB: no request at all" "$([ -f "$work/requests.jso
 run --model acme/video --modality video --prompt "x" --reference "$ref_png"
 check_code "--reference on video: usage exit 2" "$code" 2
 
+# --- load_reference: SVG width/height from viewBox (Recraft round-trip) ---
+ref_svg_viewbox_only="$work/ref-viewbox-only.svg"
+printf '%s' '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2048 2048"><circle r="4"/></svg>' > "$ref_svg_viewbox_only"
+ref_svg_with_dims="$work/ref-with-dims.svg"
+printf '%s' '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="20" viewBox="0 0 10 20"><circle r="4"/></svg>' > "$ref_svg_with_dims"
+ref_svg_no_viewbox="$work/ref-no-viewbox.svg"
+printf '%s' '<svg xmlns="http://www.w3.org/2000/svg"><circle r="4"/></svg>' > "$ref_svg_no_viewbox"
+ref_svg_comma_viewbox="$work/ref-comma-viewbox.svg"
+printf '%s' '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0,0,64,32"><circle r="4"/></svg>' > "$ref_svg_comma_viewbox"
+ref_svg_stroke_width="$work/ref-stroke-width.svg"
+printf '%s' '<svg viewBox="0 0 10 20" stroke-width="2"><circle r="4"/></svg>' > "$ref_svg_stroke_width"
+
+svg_refs="$(python3 -c "
+import sys
+sys.path.insert(0, '$ROOT/skills/visual')
+import generate
+
+def tag(path):
+    url = generate.load_reference(path)
+    raw = generate.base64.b64decode(url.split(',', 1)[1])
+    return raw.decode()
+
+print(tag('$ref_svg_viewbox_only'))
+print('---')
+print(tag('$ref_svg_with_dims'))
+print('---')
+print(tag('$ref_svg_no_viewbox'))
+print('---')
+print(tag('$ref_svg_comma_viewbox'))
+print('---')
+print(tag('$ref_svg_stroke_width'))
+")"
+check_eq "load_reference: viewBox-only SVG gets width/height from viewBox" \
+  "$(printf '%s\n' "$svg_refs" | sed -n '1p')" \
+  '<svg width="2048" height="2048" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 2048 2048"><circle r="4"/></svg>'
+check_eq "load_reference: SVG that already has width/height is unchanged" \
+  "$(printf '%s\n' "$svg_refs" | sed -n '3p')" \
+  '<svg xmlns="http://www.w3.org/2000/svg" width="10" height="20" viewBox="0 0 10 20"><circle r="4"/></svg>'
+check_eq "load_reference: SVG without a viewBox is unchanged" \
+  "$(printf '%s\n' "$svg_refs" | sed -n '5p')" \
+  '<svg xmlns="http://www.w3.org/2000/svg"><circle r="4"/></svg>'
+check_eq "load_reference: comma-separated viewBox also fills in width/height" \
+  "$(printf '%s\n' "$svg_refs" | sed -n '7p')" \
+  '<svg width="64" height="32" xmlns="http://www.w3.org/2000/svg" viewBox="0,0,64,32"><circle r="4"/></svg>'
+check_eq "load_reference: stroke-width= is not mistaken for width=, width/height still added" \
+  "$(printf '%s\n' "$svg_refs" | sed -n '9p')" \
+  '<svg width="10" height="20" viewBox="0 0 10 20" stroke-width="2"><circle r="4"/></svg>'
+
 # --- --preview (#642) ---
 preview_bin="$work/preview-bin"
 mkdir -p "$preview_bin"
