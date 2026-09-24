@@ -22,24 +22,24 @@ that report.
 
 ## Install
 
-Install from a local marketplace (recommended for development):
+Install from the marketplace:
+
+```bash
+claude plugin marketplace add dimitritholen/clouter
+claude plugin install clouter@clouter
+```
+
+For development, install from your local clone:
 
 ```bash
 claude plugin marketplace add ~/dev/clouter
 claude plugin install clouter@clouter
 ```
 
-For a one-off development session without installing:
+Or run a one-off development session without installing:
 
 ```bash
 claude --plugin-dir ~/dev/clouter
-```
-
-To install from GitHub once the repository is published:
-
-```bash
-claude plugin marketplace add dimitritholen/clouter
-claude plugin install clouter@clouter
 ```
 
 ## Key setup
@@ -75,6 +75,10 @@ machine, the same run serves a paste page whose URL is printed on stderr;
 ```bash
 bash tests/run-all.sh
 ```
+
+## License
+
+MIT license. See LICENSE for details.
 
 ## If you also run 1337-claude
 
