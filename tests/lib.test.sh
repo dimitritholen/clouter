@@ -117,6 +117,8 @@ check_code "0644 file refused" "$code" 1
 check_eq "refusal names mode and fix" "$(grep -c 'mode 0644.*chmod 600' "$work/stderr")" "1"
 OPENROUTER_API_KEY=env-key py 'from lib import keys; print(keys.get("OPENROUTER_API_KEY"))'
 check_eq "env key skips the loose file" "$out" "env-key"
+py 'from lib import keys; keys.os.name = "nt"; print(keys.get("OPENROUTER_API_KEY"))'
+check_eq "Windows (os.name nt): no POSIX mode check, file key read" "$out" "new-key"
 chmod 600 "$work/credentials"
 
 # --- jev ------------------------------------------------------------------

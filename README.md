@@ -115,6 +115,15 @@ Or run a one-off development session without installing:
 claude --plugin-dir ~/dev/clouter
 ```
 
+### Platforms
+
+macOS, Linux and Windows. It needs Python 3 on `PATH` under any of the
+names `python3`, `python` or `py`, and uses nothing outside the standard
+library. On Windows the hook runs through the Git Bash that Claude Code
+uses. For the critic to judge an SVG, it has to turn it into an image
+first, using Chrome or Chromium, `rsvg-convert`, or macOS's built-in
+`sips`, whichever it finds.
+
 ## Key setup
 
 Run once, in a session:
@@ -148,8 +157,11 @@ machine, the same run serves a paste page whose URL is printed on stderr;
 ## Running tests
 
 ```bash
-bash tests/run-all.sh
+bash tests/run-all.sh     # the full suite (macOS, Linux, WSL)
+python3 tests/smoke.py    # the parts that differ per OS; also runs on Windows
 ```
+
+CI runs the suite on Ubuntu and macOS, and the smoke test on all three.
 
 ## License
 

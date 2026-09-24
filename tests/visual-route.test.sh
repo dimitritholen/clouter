@@ -310,4 +310,21 @@ run "Earlier a <task-notification> arrived, now please make a video of a sunrise
 check_eq "task-notification mentioned mid-prompt still routes: video prompt" "$(ctx | grep -c 'asks for a video')" "1"
 check_eq "task-notification mentioned mid-prompt still routes: Jev called" "$(requests)" "3"
 
+# --- hooks.json's command: finds python3, python or py (Windows has no python3) ---
+hook_cmd="$(jq -r '.hooks.UserPromptSubmit[0].hooks[0].command' "$ROOT/hooks/hooks.json")"
+bash_bin="$(command -v bash)"
+mkdir -p "$work/bin-python-only" "$work/bin-none"
+cat > "$work/bin-python-only/python" <<EOF
+#!$bash_bin
+printf '%s\n' "\$@" >> "$work/python-calls"
+exec "$(command -v python3)" "\$@"
+EOF
+chmod +x "$work/bin-python-only/python"
+hook_out=$(printf '{"prompt":"hello"}' | CLOUTER_VISUAL=0 CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$work/bin-python-only" "$bash_bin" -c "$hook_cmd" 2>&1); hook_code=$?
+check_code "hook command, only 'python' on PATH: exit 0" "$hook_code" 0
+check_eq "hook command, only 'python' on PATH: route.py ran" "$(grep -c 'skills/visual/route.py$' "$work/python-calls")" "1"
+hook_out=$(printf '{"prompt":"hello"}' | CLAUDE_PLUGIN_ROOT="$ROOT" PATH="$work/bin-none" "$bash_bin" -c "$hook_cmd" 2>&1); hook_code=$?
+check_code "hook command, no python at all: exit 0" "$hook_code" 0
+check_eq "hook command, no python at all: silent" "$hook_out" ""
+
 exit $fail

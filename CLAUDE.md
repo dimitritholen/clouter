@@ -25,7 +25,7 @@ does and how to install it.
 - `lib/` — shared helpers: `jev.py` (HTTP client for Jev/TypeSafe),
   `keys.py` (credentials file read/write), `png.py` (PNG decode/encode,
   bbox trim).
-- `tests/` — `*.test.sh` cases plus `tests/run-all.sh`; `tests/fixtures/llms/`
+- `tests/` — `*.test.sh` cases plus `tests/run-all.sh`, and `tests/smoke.py` (cross-platform, runs on Windows); `tests/fixtures/llms/`
   — sample `llms.txt` fixtures for `spec.py`'s tests.
 
 ## Running tests
