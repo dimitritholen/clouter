@@ -29,14 +29,14 @@ check_eq "round trip: preferred value read back" "$(py 'print(learned.preferred(
 check_eq "round trip: rejected value decoded" "$(py 'print(list(learned.rejected("acme/tts", "response_format")))')" "['mp3']"
 check_eq "round trip: rejected keeps its seen date" "$(py 'print(list(learned.rejected("acme/tts", "response_format").values())[0][:10])')" "$(date -u +%Y-%m-%d)"
 check_eq "round trip: file shape" "$(jq -c '."acme/tts" | [.prefer.response_format.value, (.rejected.response_format | keys)]' "$CLOUTER_LEARNED")" '["pcm",["\"mp3\""]]'
-check_eq "round trip: file mode 0600" "$(stat -c %a "$CLOUTER_LEARNED")" "600"
+check_eq "round trip: file mode 0600" "$(stat -c %a "$CLOUTER_LEARNED" 2>/dev/null || stat -f %Lp "$CLOUTER_LEARNED")" "600"
 check_eq "round trip: unknown model reads None" "$(py 'print(learned.preferred("no/model", "response_format"))')" "None"
 py 'learned.record_prefer("acme/int", "duration", 8)'
 check_eq "round trip: non-string value survives" "$(py 'print(repr(learned.preferred("acme/int", "duration")))')" "8"
 
 # --- directory is created 0700 ---
 CLOUTER_LEARNED="$work/newdir/learned.json" py 'learned.record_prefer("acme/x", "endpoint", "images")'
-check_eq "new directory created with mode 0700" "$(stat -c %a "$work/newdir")" "700"
+check_eq "new directory created with mode 0700" "$(stat -c %a "$work/newdir" 2>/dev/null || stat -f %Lp "$work/newdir")" "700"
 
 # --- 31-day-old entries ignored ---
 old="$(date -u -d '31 days ago' +%Y-%m-%dT%H:%M:%SZ)"

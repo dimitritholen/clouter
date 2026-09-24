@@ -274,7 +274,7 @@ check_eq "gen model without image input: plain string content, no reference" "$(
 # --- no key -----------------------------------------------------------------------
 OPENROUTER_API_KEY= run original.png --prompt "A red fox" --model acme/gen --critic acme/critic-pass
 check_code "no key: exit 3" "$code" 3
-check_eq "no key: no request made" "$([ -f "$work/requests.jsonl" ] && wc -l < "$work/requests.jsonl" || echo 0)" "0"
+check_eq "no key: no request made" "$([ -f "$work/requests.jsonl" ] && wc -l < "$work/requests.jsonl" | tr -d " " || echo 0)" "0"
 
 # --- cost log ------------------------------------------------------------------
 log="$work/costs/visual.jsonl"
@@ -302,7 +302,9 @@ exit 0
 EOF
 chmod +x "$work/bin-ok/google-chrome"
 mkdir -p "$work/bin-empty"
-py_dir="$(dirname "$(command -v python3)")"
+# python3 alone on PATH: a real /usr/bin could hold rsvg-convert or sips.
+mkdir -p "$work/bin-py" && ln -sf "$(command -v python3)" "$work/bin-py/python3"
+py_dir="$work/bin-py"
 
 run_with_path() { rm -f "$work/requests.jsonl"; out=$(PATH="$1" "$SCRIPT" "${@:2}" 2>"$work/stderr"); code=$?; }
 
@@ -319,6 +321,22 @@ svg_body2="$(jq -c 'select(.body.model=="acme/critic-pass")' "$work/requests.jso
 svg_content2="$(printf '%s' "$svg_body2" | jq -r '.body.messages[1].content')"
 check_eq "svg without chrome: content is text only (1 part)" "$(printf '%s' "$svg_content2" | jq 'length')" "1"
 check_eq "svg without chrome: svg markup sent as text" "$(printf '%s' "$svg_content2" | jq -r '.[0].text' | grep -c '<svg')" "1"
+
+mkdir -p "$work/bin-rsvg"
+cat > "$work/bin-rsvg/rsvg-convert" <<EOF
+#!$(command -v bash)
+while [ \$# -gt 0 ]; do [ "\$1" = -o ] && printf '%s' "$TINY_PNG_B64" | $(command -v base64) -d > "\$2"; shift; done
+EOF
+chmod +x "$work/bin-rsvg/rsvg-convert"
+run_with_path "$work/bin-rsvg:$py_dir" shape.svg --prompt "A rectangle" --model acme/gen --critic acme/critic-pass
+check_code "svg with rsvg-convert, no chrome: exit 0" "$code" 0
+svg_content3="$(jq -c 'select(.body.model=="acme/critic-pass")' "$work/requests.jsonl" | jq -r '.body.messages[1].content')"
+check_eq "svg with rsvg-convert: image part is a PNG data url" "$(printf '%s' "$svg_content3" | jq -r '.[1].image_url.url' | cut -c1-22)" "data:image/png;base64,"
+
+{ printf '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 32">'; for i in $(seq 1 700); do printf '<path d="M 0 0 L 64 32 L 0 32 z"/>'; done; printf '</svg>'; } > big.svg
+run_with_path "$work/bin-empty:$py_dir" big.svg --prompt "A rectangle" --model acme/gen --critic acme/critic-pass
+check_code "big svg, nothing to rasterise: refused" "$code" 2
+check_eq "big svg: nothing sent to the critic" "$([ -s "$work/requests.jsonl" ] && echo sent || echo none)" "none"
 
 # --- SVG rasterisation window: sized from the SVG's own aspect ratio, not a fixed square ---
 cat > wide.svg <<'EOF'

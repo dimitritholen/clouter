@@ -145,6 +145,9 @@ that choice.
    above; with `--no-critique` (the studio default) it's just those first
    five keys — see "Studio loop" for what to report and when. On "Stay with
    Claude" carry on as usual and do not mention the models again.
+   A stderr note "asked for --aspect X, the model returned WxH" means the
+   model ignored the ratio: tell the user, and for the next round try
+   `--endpoint images` (whose `aspect_ratio` field spec.py lists) or crop.
    `--endpoint auto` (default) posts to chat/completions and retries
    against /api/v1/images on a 404.
 
@@ -276,9 +279,10 @@ its exit code:
   into the brief; the brief only ever describes the picture or sound
   itself.
 
-  Push the new round the same way as the first, adding `--parent <base
-  round>` (and `--defects-file` again for raster/vector), then `wait`
-  again.
+  Push the new round the same way as the first, adding `--session
+  <session dir>` (the one the first `push` printed; without it `push`
+  starts a new session and refuses `--parent`), `--parent <base round>`
+  and `--defects-file` again for raster/vector, then `wait` again.
 - **10, accept.** Report the accepted round's original output path (the
   `path` you kept from that round's `generate.py` call, not the copy under
   `rounds/`) and the running cost total across every round. Then run
