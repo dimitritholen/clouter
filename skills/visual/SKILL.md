@@ -8,6 +8,9 @@ audio into a file on disk, made by the cheapest OpenRouter model that fits,
 chosen by the user from a short priced list. You never spend credit without
 that choice.
 
+The commands below say `python3`. Where that name doesn't exist (a
+standard Windows install), run the same command with `python`, or `py`.
+
 # The flow
 
 1. **The hook asks.** A UserPromptSubmit hook (`skills/visual/route.py`)

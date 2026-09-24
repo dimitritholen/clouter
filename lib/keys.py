@@ -6,7 +6,8 @@
 
 The file is ~/.config/clouter/credentials, NAME=value per line, mode 0600.
 A file readable by group or others is refused, so a key never leaks through
-a careless chmod. CLOUTER_CREDENTIALS points elsewhere for tests.
+a careless chmod (POSIX only: Windows has no such modes, its profile ACL
+guards the file). CLOUTER_CREDENTIALS points elsewhere for tests.
 Stdlib only.
 """
 
@@ -37,6 +38,11 @@ def path():
 
 
 def _check_mode(file_path):
+    if os.name == "nt":
+        # Windows has no POSIX modes: st_mode reads 0o666 for every file,
+        # so this check would refuse them all. The per-user profile ACL
+        # on %USERPROFILE%\.config guards the file there instead.
+        return
     mode = stat.S_IMODE(os.stat(file_path).st_mode)
     if mode & 0o077:
         raise UnsafeFile(

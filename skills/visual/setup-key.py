@@ -29,6 +29,7 @@ import html
 import json
 import os
 import secrets
+import socketserver
 import sys
 import time
 import urllib.error
@@ -187,12 +188,20 @@ def launch_browser(url):
             os.close(fd)
 
 
+class LocalServer(HTTPServer):
+    def server_bind(self):
+        # HTTPServer.server_bind reverse-resolves the host (socket.getfqdn),
+        # which takes ~35s on a Mac with slow DNS.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
 def serve(timeout, open_browser):
     verifier = b64url(secrets.token_bytes(32))
     challenge = b64url(hashlib.sha256(verifier.encode("ascii")).digest())
     nonce = secrets.token_urlsafe(16)
 
-    server = HTTPServer(("127.0.0.1", 0), Handler)
+    server = LocalServer(("127.0.0.1", 0), Handler)
     server.verifier, server.nonce, server.result = verifier, nonce, None
     server.timeout = 0.5
     port = server.server_port
