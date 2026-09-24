@@ -565,9 +565,47 @@
         }
       });
 
+      // Canvas pixel size: the natural size when its long edge is at least
+      // MIN_LONG_EDGE, otherwise scaled up to that long edge. SVGs often have
+      // no usable intrinsic size (Chromium reports a 150x150 fallback), so
+      // their aspect ratio comes from a laid-out probe of the same image.
+      var MIN_LONG_EDGE = 1024;
+
+      function isSvgWithoutSize(nw, nh) {
+        var path = String(imgUrl).split(/[?#]/)[0].toLowerCase();
+        return !nw || !nh || (nw === 150 && nh === 150) || /\.svg$/.test(path);
+      }
+
+      function svgAspect() {
+        // imgEl itself is sized by the canvas (100% of .ce-stage-inner), so it
+        // cannot tell us the ratio; lay out a detached probe at a fixed width
+        // and let the browser derive the height from the SVG's viewBox.
+        var probe = document.createElement('img');
+        probe.alt = '';
+        probe.style.cssText = 'position:absolute;left:-99999px;top:0;visibility:hidden;' +
+          'width:' + MIN_LONG_EDGE + 'px;height:auto;max-width:none;max-height:none;';
+        probe.src = imgEl.currentSrc || imgEl.src;
+        document.body.appendChild(probe);
+        var r = probe.getBoundingClientRect();
+        probe.remove();
+        // A height of exactly 150 is the no-intrinsic-ratio fallback, not a ratio.
+        if (r.width > 0 && r.height > 0 && r.height !== 150) return r.width / r.height;
+        return 1;
+      }
+
+      function canvasSize() {
+        var nw = imgEl.naturalWidth || imgEl.width;
+        var nh = imgEl.naturalHeight || imgEl.height;
+        if (nw && nh && Math.max(nw, nh) >= MIN_LONG_EDGE) return { w: nw, h: nh };
+        var aspect = isSvgWithoutSize(nw, nh) ? svgAspect() : nw / nh;
+        if (aspect >= 1) return { w: MIN_LONG_EDGE, h: Math.max(1, Math.round(MIN_LONG_EDGE / aspect)) };
+        return { w: Math.max(1, Math.round(MIN_LONG_EDGE * aspect)), h: MIN_LONG_EDGE };
+      }
+
       ready.then(function () {
-        naturalWidth = imgEl.naturalWidth || imgEl.width;
-        naturalHeight = imgEl.naturalHeight || imgEl.height;
+        var size = canvasSize();
+        naturalWidth = size.w;
+        naturalHeight = size.h;
         drawCanvas.width = naturalWidth;
         drawCanvas.height = naturalHeight;
         lineWidth = Math.max(1, Math.round(Math.max(naturalWidth, naturalHeight) * 0.004));
