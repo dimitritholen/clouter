@@ -53,8 +53,11 @@ POST /api/answers {"id": <question set>, "answers": [{"answer": <label or
 POST /api/accept, POST /api/models {"round": n} (202, asks
 critique.model_options in a background thread for alternative generator
 models and stores them on the round; 409 while one is already pending)
-and GET /api/catalogue (every catalogue model for the session's
-modality, cached in memory for 10 minutes). JSON errors are
+and GET /api/catalogue[?modality=<m>] (every catalogue model for that
+modality, default the session's, cached in memory per modality for 10
+minutes). Every round records its own modality: a session shared by an
+SVG and a PNG (one interview, two formats) keeps model suggestions and
+the catalogue check per round's format. JSON errors are
 {"error": "..."} with a 4xx status. The server exits after
 --idle-minutes without an SSE client, or 60 s after an accept, and
 removes server.json on exit.
@@ -85,6 +88,7 @@ import contextlib
 import datetime
 import http.server
 import json
+import math
 import mimetypes
 import os
 import re
@@ -318,7 +322,7 @@ class Studio:
         self.stopping = threading.Event()
         self.mtime = self._mtime()
         self.catalogue_lock = threading.Lock()
-        self.catalogue_cache = None  # (modality, expiry_monotonic, entries) or None
+        self.catalogue_cache = {}  # modality -> (expiry_monotonic, entries)
 
     def _mtime(self):
         try:
@@ -436,7 +440,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if path == "/api/session":
                 return self.send_json(load_session(self.studio.dir))
             if path == "/api/catalogue":
-                return self.get_catalogue()
+                return self.get_catalogue(urllib.parse.parse_qs(url.query))
             if path == "/events":
                 return self.get_events()
             if path.startswith("/files/"):
@@ -465,16 +469,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.send_error_json(404, "not found")
         return self.send_file(os.path.realpath(full), content_type(full))
 
-    def get_catalogue(self):
+    def get_catalogue(self, query):
+        """?modality= picks the list for one round's format in a session that
+        holds several; without it, the session's own modality."""
         studio = self.studio
-        try:
-            modality = load_session(studio.dir).get("modality")
-        except (OSError, ValueError) as e:
-            return self.send_error_json(500, f"cannot read session: {e}")
+        modality = (query.get("modality") or [None])[0]
+        if modality is not None and modality not in MODALITIES:
+            return self.send_error_json(400, "unknown modality")
+        if modality is None:
+            try:
+                modality = load_session(studio.dir).get("modality")
+            except (OSError, ValueError) as e:
+                return self.send_error_json(500, f"cannot read session: {e}")
         with studio.catalogue_lock:
-            cached = studio.catalogue_cache
-            if cached and cached[0] == modality and time.monotonic() < cached[1]:
-                return self.send_json({"models": cached[2]})
+            cached = studio.catalogue_cache.get(modality)
+            if cached and time.monotonic() < cached[0]:
+                return self.send_json({"models": cached[1]})
         catalogue = _import_catalogue()
         try:
             found = catalogue.models(modality)
@@ -485,7 +495,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
               "reference_supported": bool(e.get("reference_supported"))} for e in found),
             key=lambda e: (e["price"] is None, e["price"] if e["price"] is not None else 0.0))
         with studio.catalogue_lock:
-            studio.catalogue_cache = (modality, time.monotonic() + CATALOGUE_TTL_SECONDS, entries)
+            studio.catalogue_cache[modality] = (time.monotonic() + CATALOGUE_TTL_SECONDS, entries)
         return self.send_json({"models": entries})
 
     def get_events(self):
@@ -589,10 +599,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.send_error_json(400, "body must be a JSON object")
         d = self.studio.dir
         with self.studio.catalogue_lock:
-            cached = self.studio.catalogue_cache
-        catalogue_ids = {m["id"] for m in cached[2]} if cached else None
+            cache = dict(self.studio.catalogue_cache)
         with locked(d):
             session = load_session(d)
+            cached = cache.get(round_modality(session, body.get("round")))
+            catalogue_ids = {m["id"] for m in cached[1]} if cached else None
             try:
                 entry = build_entry(d, session, action, body, catalogue_ids=catalogue_ids)
             except ValueError as e:
@@ -658,6 +669,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return self.send_json({"status": "pending"}, 202)
 
 
+def round_modality(session, n):
+    """The format of round n: its own, else the session's (older rounds and
+    single-format sessions carry none of their own)."""
+    round_ = next((r for r in session.get("rounds", []) if r.get("n") == n), None)
+    return (round_ or {}).get("modality") or session.get("modality")
+
+
 def run_model_options(d, studio, n):
     """Background thread body for POST /api/models: rank alternative generator
     models for round n and write them to session.json, notifying over SSE."""
@@ -669,7 +687,7 @@ def run_model_options(d, studio, n):
         exclude = {r.get("model") for r in session.get("rounds", []) if r.get("model")}
         key = critique.keys.get("OPENROUTER_API_KEY")  # raises MissingKey/UnsafeFile
         found = critique.model_options(
-            session.get("modality"), round_.get("brief") or "", request=session.get("request"),
+            round_modality(session, n), round_.get("brief") or "", request=session.get("request"),
             defects=round_.get("defects"), exclude=exclude, key=key)
     except Exception as e:  # noqa: BLE001 - any failure is reported to the page, never crashes the thread
         error = str(e)
@@ -736,12 +754,12 @@ def build_answers(questions, answers):
             raise ValueError(f"answer {i}: other must be non-empty text or null")
         if q["multiSelect"]:
             answer = answer or []
-            if not isinstance(answer, list) or not all(x in labels for x in answer):
+            if not isinstance(answer, list) or not all(isinstance(x, str) and x in labels for x in answer):
                 raise ValueError(f"answer {i} must be a list of this question's option labels")
             if not answer and other is None:
                 raise ValueError(f"answer {i}: pick at least one option or fill in Other")
         else:
-            if answer is not None and answer not in labels:
+            if answer is not None and (not isinstance(answer, str) or answer not in labels):
                 raise ValueError(f"answer {i} must be one of this question's option labels")
             if (answer is None) == (other is None):
                 raise ValueError(f"answer {i}: pick exactly one option or fill in Other")
@@ -758,7 +776,7 @@ def parse_extras(values):
             value = float(cost)
         except ValueError:
             value = None
-        if not sep or not label.strip() or value is None or value < 0:
+        if not sep or not label.strip() or value is None or not math.isfinite(value) or value < 0:
             raise UsageError(f"--extra {raw!r}: use label=usd, such as voice-over=0.002")
         extras.append({"label": label.strip(), "cost": value})
     return extras
@@ -992,6 +1010,8 @@ def ask(args):
 def push(args):
     d = session_dir(args)
     extras = parse_extras(args.extra)
+    if not math.isfinite(args.cost) or args.cost < 0:
+        raise UsageError(f"--cost {args.cost}: must be a finite amount of 0 or more")
     if not os.path.isfile(args.file):
         raise UsageError(f"no such file {args.file}")
     media_type = guess_media_type(args.file)
@@ -1029,7 +1049,7 @@ def push(args):
         rel = f"rounds/round-{n}.{MEDIA_EXT[media_type]}"
         shutil.copyfile(args.file, os.path.join(d, rel))
         round_entry = {"n": n, "file": rel, "media_type": media_type, "model": args.model,
-                       "cost": args.cost, "brief": brief, "parent": args.parent,
+                       "modality": args.modality or session.get("modality"), "cost": args.cost, "brief": brief, "parent": args.parent,
                        "defects": defects, "created": now_iso()}
         if message is not None:
             round_entry["message"] = message

@@ -417,6 +417,12 @@ check_eq "answers with both a label and Other on a single choice: 400" "${resp%%
 printf '{"id": 7, "answers": []}' > "$work/a.json"
 resp=$(http POST /api/answers "$work/a.json" application/json)
 check_eq "answers to an unknown set: 400" "${resp%% *}" "400"
+printf '{"id": 1, "answers": [{"answer": [], "other": null}, {"answer": ["SVG"], "other": null}]}' > "$work/a.json"
+resp=$(http POST /api/answers "$work/a.json" application/json)
+check_eq "answers with a list on a single choice: 400, not a dropped connection" "${resp%% *}" "400"
+printf '{"id": 1, "answers": [{"answer": "Monochrome", "other": null}, {"answer": [["SVG"]], "other": null}]}' > "$work/a.json"
+resp=$(http POST /api/answers "$work/a.json" application/json)
+check_eq "answers with a nested list on a multi-select: 400" "${resp%% *}" "400"
 printf '{"id": 1, "answers": [{"answer": null, "other": "only greys"}, {"answer": ["SVG", "PNG"], "other": "and a WebP"}]}' > "$work/a.json"
 resp=$(http POST /api/answers "$work/a.json" application/json)
 check_eq "answers: 200" "${resp%% *}" "200"
@@ -439,6 +445,24 @@ check_eq "push --extra: questions kept beside the round" "$(jget "$(cat "$S3/ses
 "$SCRIPT" push --session "$S3" --file "$work/one.png" --model test/model --cost 0.03 \
   --brief-file "$work/brief.txt" --extra "no-amount" >/dev/null 2>"$work/stderr"
 check_code "push --extra without =usd: exit 2" "$?" 2
+for bad in "critic=nan" "critic=inf" "critic=-0.01"; do
+  "$SCRIPT" push --session "$S3" --file "$work/one.png" --model test/model --cost 0.03 \
+    --brief-file "$work/brief.txt" --extra "$bad" >/dev/null 2>"$work/stderr"
+  check_code "push --extra $bad: exit 2" "$?" 2
+done
+"$SCRIPT" push --session "$S3" --file "$work/one.png" --model test/model --cost nan \
+  --brief-file "$work/brief.txt" >/dev/null 2>"$work/stderr"
+check_code "push --cost nan: exit 2" "$?" 2
+python3 -c 'import json,sys; json.loads(open(sys.argv[1]).read(), parse_constant=lambda c: sys.exit("non-finite " + c))' "$S3/session.json"
+check_code "session.json holds no NaN or Infinity" "$?" 0
+
+# --- one session, two formats: every round keeps its own modality ----------
+"$SCRIPT" push --session "$S3" --file "$work/one.png" --model test/model --cost 0.03 \
+  --brief-file "$work/brief.txt" --modality raster_image >/dev/null 2>"$work/stderr"
+check_code "push a second format into the question session: exit 0" "$?" 0
+check_eq "rounds keep their own modality" "$(jget "$(cat "$S3/session.json")" '[r["modality"] for r in d["rounds"]], d["modality"]')" "(['vector_svg', 'raster_image'], 'vector_svg')"
+resp=$(http GET "/api/catalogue?modality=hologram")
+check_eq "GET /api/catalogue with an unknown modality: 400" "${resp%% *}" "400"
 
 # --- the plugin's logos are served from assets/ ----------------------------
 resp=$(http GET /static/logo-dark.png)

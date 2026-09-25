@@ -274,7 +274,10 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/visual/studio.py" wait --session <session 
 The first `ask` of a request has no `--session` and needs
 `--request-file`/`--modality`; it creates the session and opens the page.
 Keep its `session` dir and pass `--session <dir>` to every later `ask`
-and `push`, so the questions and the rounds share one history.
+and `push`, so the questions and the rounds share one history. With more
+than one format (an SVG and a PNG), every format's rounds go into that
+one session, and every `push` carries its own `--modality`: the round
+keeps it, so model suggestions and the catalogue stay per format.
 `--message-file` is a short note shown above the questions ("Seedance
 refused the input frame; how should the calm shot be made?"). Run `wait`
 in the background as in the studio loop; answers come back on exit 0

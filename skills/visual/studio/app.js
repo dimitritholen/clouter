@@ -60,6 +60,7 @@
     acceptedDefects: {}, // round n -> Set of defect ids
     modelChoice: {}, // round n -> null (keep) | {type: 'suggested'|'manual', id, name}
     catalogue: null, // null | 'loading' | 'error' | [entries]
+    catalogueModality: null, // the modality state.catalogue was loaded for
     catalogueError: null,
     catalogueSort: { key: 'price', dir: 'asc' },
     timelineController: null,
@@ -331,7 +332,11 @@
     if (!s) return;
     els.headerRequest.textContent = s.request || '';
     els.headerRequest.title = s.request || '';
-    els.headerModality.textContent = s.modality || '';
+    var formats = [];
+    [s.modality].concat(rounds().map(function (r) { return r.modality; })).forEach(function (m) {
+      if (m && formats.indexOf(m) === -1) formats.push(m);
+    });
+    els.headerModality.textContent = formats.join(' · ');
     els.headerState.textContent = s.state || '';
     renderCost();
   }
@@ -607,6 +612,12 @@
     }
     return { answers: answers };
   }
+
+  // Enter in an Other field submits the form; send the answers instead of reloading.
+  els.questionForm.addEventListener('submit', function (e) {
+    e.preventDefault();
+    els.sendAnswersBtn.click();
+  });
 
   els.sendAnswersBtn.addEventListener('click', function () {
     var qset = findQuestionSet(state.selectedQuestions);
@@ -925,11 +936,21 @@
 
   // ---------- manual model dialog ----------
 
+  // The format of a round: its own, else the session's.
+  function roundModality(round) {
+    return (round && round.modality) || (state.session && state.session.modality) || '';
+  }
+
   function loadCatalogue() {
+    var modality = roundModality(currentRound());
+    if (state.catalogueModality !== modality) {
+      state.catalogue = null; // a session with an SVG and a PNG needs a list per format
+      state.catalogueModality = modality;
+    }
     if (state.catalogue === 'loading' || Array.isArray(state.catalogue)) return;
     state.catalogue = 'loading';
     renderManualModelList();
-    fetch('/api/catalogue').then(function (res) {
+    fetch('/api/catalogue?modality=' + encodeURIComponent(modality)).then(function (res) {
       return res.json().then(function (data) { return { ok: res.ok, data: data }; });
     }).then(function (r) {
       if (!r.ok) {

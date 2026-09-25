@@ -174,7 +174,8 @@ def context(prompt, picks, transparent=False, request_path=None):
                 f"--questions-file <q.json>{request_flag} --modality <modality> (later calls add "
                 "--session <dir> instead, and so does every push), tell the user the url once, "
                 f"then `studio.py wait --session <dir>` in the background for the answers. Only "
-                "when ask exits non-zero, ask with AskUserQuestion in the terminal.")
+                "when ask exits non-zero, or the user says the page won't open, ask with "
+                "AskUserQuestion in the terminal.")
 
     def interview_instruction(modality):
         return (f"Before anything else, run the interview (\"Interview\" in SKILL.md): fill a "

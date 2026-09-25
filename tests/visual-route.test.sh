@@ -186,7 +186,7 @@ check_eq "svg prompt: generate.py runs with --no-critique" "$(ctx | grep -c -- '
 check_eq "svg prompt: names studio.py push" "$(ctx | grep -c 'studio.py" push')" "1"
 check_eq "svg prompt: names studio.py wait, for answers and for rounds" "$(ctx | grep -c 'studio.py wait --session')" "2"
 check_eq "svg prompt: questions go to the studio page" "$(ctx | head -n 1 | grep -c 'Ask every question in the studio page.*studio.py" ask --questions-file <q.json>')" "1"
-check_eq "svg prompt: terminal only as the fallback" "$(ctx | head -n 1 | grep -c 'Only when ask exits non-zero, ask with AskUserQuestion in the terminal')" "1"
+check_eq "svg prompt: terminal only as the fallback" "$(ctx | head -n 1 | grep -c 'Only when ask exits non-zero, or the user says the page won.t open, ask with AskUserQuestion in the terminal')" "1"
 check_eq "svg prompt: push reuses the question session" "$(ctx | grep -c 'studio.py" push --session <dir> --file <file>')" "1"
 check_eq "svg prompt: suggests defects before pushing (vector)" "$(ctx | grep -c -- '--suggest --model <chosen id> --out <defects.json>')" "1"
 check_eq "svg prompt: push carries --defects-file (vector)" "$(ctx | grep -c -- '--defects-file <defects.json> \[--message-file <note>\]')" "1"
