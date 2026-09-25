@@ -14,7 +14,10 @@ does and how to install it.
   `catalogue.py` (live OpenRouter model list), `ranking.py` (Jev calls),
   `spec.py` (fetches and parses a model's request spec from its
   `llms.txt`), `learned.py` (remembers per model what the provider
-  rejected and what worked, `learned.json`), `generate.py` (writes the
+  rejected and what worked, `learned.json`), `interview.py` (slot
+  schema per modality, gap check before the model question, brief
+  compiled to the prompt, remembered answers per project in
+  `prefs.json`), `generate.py` (writes the
   file, logs cost), `critique.py`
   (vision-model critic and fix rounds), `studio.py` (interactive browser
   studio for image/video/audio editing and feedback), `preview.py` (light/dark contact

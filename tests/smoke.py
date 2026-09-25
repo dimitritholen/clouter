@@ -34,12 +34,13 @@ def check(name, ok, detail=""):
 work = tempfile.mkdtemp(prefix="clouter-smoke-")
 os.environ["CLOUTER_CREDENTIALS"] = os.path.join(work, "credentials")
 os.environ["CLOUTER_LEARNED"] = os.path.join(work, "learned.json")
+os.environ["CLOUTER_PREFS"] = os.path.join(work, "prefs.json")
 os.environ["CLOUTER_STUDIO_NO_OPEN"] = "1"
 os.environ.pop("OPENROUTER_API_KEY", None)
 
 # --- every module imports (fcntl, signal names, ... differ per OS) ------------
 for name in ("lib.jev", "lib.keys", "lib.png", "catalogue", "ranking", "spec",
-             "learned", "generate", "critique", "preview", "studio", "route"):
+             "learned", "generate", "critique", "preview", "studio", "route", "interview"):
     try:
         __import__(name)
         check(f"import {name}", True)
