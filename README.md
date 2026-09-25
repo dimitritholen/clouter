@@ -16,25 +16,33 @@ result in a browser studio until it's right.
 2. [Jev](https://typesafe.ai), TypeSafe's decision model, works out what
    kind of file you want (raster image, vector SVG, video or speech) and
    ranks OpenRouter's models for it by price and fit.
-3. You pick a model from that ranked list, or choose to stay with Claude.
-4. The chosen model makes round 1.
-5. For an image or SVG, a vision-model critic looks it over and lists what
+3. Claude fills a brief from your request and the repo, and asks only
+   what it still lacks: at most four multiple-choice questions in one go
+   (the exact text in the picture, the colours, a transparent
+   background, the duration), often none. Answers about colours, style
+   and voice are remembered per project, so the next request asks less.
+4. You pick a model from that ranked list, or choose to stay with Claude.
+   When an answer changed what the model has to do, the list is ranked
+   again on the brief.
+5. The chosen model makes round 1.
+6. For an image or SVG, a vision-model critic looks it over and lists what
    it thinks is wrong.
-6. The studio opens in your browser with the result and the critic's
+7. The studio opens in your browser with the result and the critic's
    notes.
-7. You give feedback: type new instructions, tick a critic suggestion,
+8. You give feedback: type new instructions, tick a critic suggestion,
    draw on the image, drop notes on the video or audio timeline, or pick
    a different model.
-8. Claude turns your feedback into a better brief and makes the next
-   round, and the loop goes back to step 5.
-9. You press Accept on the round you like, and Claude reports the file
+9. Claude turns your feedback into a better brief and makes the next
+   round, and the loop goes back to step 6.
+10. You press Accept on the round you like, and Claude reports the file
    and the total cost.
 
 ```mermaid
 flowchart TD
     A["You ask for an image, SVG, video or voice-over"] --> B["Hook notices the request"]
     B --> C["Jev ranks OpenRouter models by price and fit"]
-    C --> D["You pick a model"]
+    C --> Q["Claude asks what the brief still lacks"]
+    Q --> D["You pick a model"]
     D --> E["Model makes a round"]
     E --> F["Critic checks it"]
     F --> G["Studio opens in your browser"]

@@ -172,6 +172,10 @@ check_eq "svg prompt: prices in the labels" "$(ctx | grep -c 'per 1K image token
 check_eq "svg prompt: Jev probabilities in the labels" "$(ctx | grep -c 'Jev 0\.[0-9][0-9]')" "3"
 check_eq "svg prompt: stay-with-Claude option is fourth" "$(ctx | grep -c '^4\. Stay with Claude')" "1"
 check_eq "svg prompt: asks with AskUserQuestion" "$(ctx | grep -c 'AskUserQuestion')" "1"
+check_eq "svg prompt: interview before the model question" "$(ctx | head -n 1 | grep -c 'run the interview.*gaps --brief <brief.json>.*Then ask with AskUserQuestion')" "1"
+check_eq "svg prompt: interview names the modality's slots" "$(ctx | grep -c 'interview.py" slots vector_svg')" "1"
+check_eq "svg prompt: re-rank through interview.py rank" "$(ctx | grep -c 'interview.py" rank --brief <brief.json>')" "1"
+check_eq "svg prompt: brief compiled before generate.py" "$(ctx | grep -c 'interview.py" compile --brief <brief.json> --out <path to the design brief> --remember')" "1"
 check_eq "svg prompt: names generate.py with modality" "$(ctx | grep -c 'generate.py" --model <chosen id> --modality vector_svg')" "1"
 check_eq "svg prompt: generate.py runs with --no-critique" "$(ctx | grep -c -- '--no-critique')" "1"
 check_eq "svg prompt: names studio.py push" "$(ctx | grep -c 'studio.py" push')" "1"
@@ -190,7 +194,7 @@ check_eq "prompt goes to Jev as state" "$(jq -r 'select(.method=="POST") | .body
 
 run "Undecided: draw a vector fox"
 check_code "low model confidence: exit 0" "$code" 0
-check_eq "low model confidence: no Recommended, cheapest first" "$(ctx | grep -c 'Recommended')" "0"
+check_eq "low model confidence: no Recommended, cheapest first" "$(ctx | grep -c '^[0-9]\. .*Recommended')" "0"
 check_eq "low model confidence: cheap to expensive" "$(ctx | grep -o '^[123]\. [^ ]*' | tr '\n' ' ')" "1. acme/svg-cheap 2. acme/svg-mid 3. recraft/recraft-v4.1-vector "
 
 run "Make a short video of a sunrise"
@@ -228,6 +232,7 @@ check_eq "svg and png prompt: transparent drops the non-alpha raster model, one 
 check_eq "svg and png prompt: Stay with Claude closes both questions" "$(ctx | grep -c '^4\. Stay with Claude\|^3\. Stay with Claude\|^2\. Stay with Claude')" "2"
 check_eq "svg and png prompt: prices in every model label" "$(ctx | grep -c '^[123]\. .*per 1K image tokens')" "$(ctx | grep -c '^[123]\. [a-z]*/')"
 check_eq "svg and png prompt: one generate.py run per format" "$(ctx | grep -c 'one run per format')" "1"
+check_eq "svg and png prompt: one brief per format, at most 4 interview questions" "$(ctx | head -n 1 | grep -c 'one brief per format.*at most 4 questions in all')" "1"
 check_eq "svg and png prompt: raster run carries --transparent" "$(ctx | grep -c -- '--transparent on the raster_image run')" "1"
 check_eq "svg and png prompt: names studio.py push" "$(ctx | grep -c 'studio.py" push')" "1"
 check_eq "svg and png prompt: names studio.py wait" "$(ctx | grep -c 'studio.py wait --session')" "1"
@@ -309,5 +314,20 @@ check_eq "task-notification wrapped in system-reminder: no Jev call" "$(requests
 run "Earlier a <task-notification> arrived, now please make a video of a sunrise"
 check_eq "task-notification mentioned mid-prompt still routes: video prompt" "$(ctx | grep -c 'asks for a video')" "1"
 check_eq "task-notification mentioned mid-prompt still routes: Jev called" "$(requests)" "3"
+
+# --- interview.py rank: the catalogue re-ranked on the compiled brief ---
+INTERVIEW="$ROOT/skills/visual/interview.py"
+export CLOUTER_PREFS="$work/prefs.json"
+printf '{"modality": "raster_image", "slots": {"subject": "a fox logo", "background": {"value": "transparent", "source": "answered"}}}' > "$work/brief.json"
+rm -f "$work/requests.jsonl"
+out=$(python3 "$INTERVIEW" rank --brief "$work/brief.json" 2>"$work/stderr"); code=$?
+check_code "rank: exit 0" "$code" 0
+check_eq "rank: transparent answer keeps only the alpha model" "$(printf '%s' "$out" | jq -r '.options[0]' | grep -o '^1\. [^ ]*')" "1. openai/gpt-image-1"
+check_eq "rank: Stay with Claude closes the list" "$(printf '%s' "$out" | jq -r '.options[-1]' | grep -c 'Stay with Claude')" "1"
+check_eq "rank: Jev sees the compiled brief, not the raw prompt" "$(jq -r 'select(.body.questions.model) | .body.state.prompt' "$work/requests.jsonl")" "$(printf 'a fox logo.\nBackground: transparent.')"
+printf '{"modality": "vector_svg", "slots": {"subject": "boom"}}' > "$work/brief.json"
+python3 "$INTERVIEW" rank --brief "$work/brief.json" >/dev/null 2>"$work/stderr"; code=$?
+check_code "rank: Jev failure exits 1" "$code" 1
+check_eq "rank: failure says to keep the hook's list" "$(grep -c "keep the hook's list" "$work/stderr")" "1"
 
 exit $fail

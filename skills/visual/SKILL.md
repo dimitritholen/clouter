@@ -22,13 +22,17 @@ that choice.
    raster models `catalogue.py` marks `alpha: true` when at least one such
    model exists, and adds `--transparent` to the raster `generate.py`
    command. It injects one `[clouter visual]` block.
-2. **The user picks.** On that block, before anything else, ask with
-   `AskUserQuestion` exactly as the block says: header "Model" (or one
+2. **You interview.** Before the model question, fill a brief and ask
+   only what it still lacks — see "Interview" below. Most detailed
+   requests need no questions at all.
+3. **The user picks.** After the interview, ask with
+   `AskUserQuestion` exactly as the block says (or as `interview.py rank`
+   printed, when an answer re-ranked the models): header "Model" (or one
    question per modality in a single call, headers "SVG model", "Image
    model", ...), Jev's pick first and marked Recommended, then cheap to
    expensive, a price in every label, "Stay with Claude" last. Never twice
    for one prompt.
-3. **You check the model's own fields.** Before generate.py, run:
+4. **You check the model's own fields.** Before generate.py, run:
 
    ```bash
    python3 "${CLAUDE_PLUGIN_ROOT}/skills/visual/spec.py" <chosen id>
@@ -40,7 +44,10 @@ that choice.
    this request: `resolution`/`size` for the quality asked, `generate_audio`
    when the user wants sound, `seed` when they need a reproducible result,
    `frame_images`/`input_references` when they supplied images,
-   `output_format`/`n` when relevant. Weigh cost before reaching for
+   `output_format`/`n` when relevant. The interview already settled some of
+   these: `compile`'s `spec_hints` (resolution, `generate_audio`, a voice,
+   `instructions` for tone and pace) map onto whichever of these fields
+   the spec actually lists; drop a hint the spec has no field for. Weigh cost before reaching for
    resolution or duration — both bill more — and say so when you choose a
    higher one. Don't set a field the request gives no reason to touch. Pass
    these as `--param key=value` (repeatable); use `--aspect`, `--duration`,
@@ -53,14 +60,19 @@ that choice.
    values the provider rejected before (listed under `"rejected"`), so an
    enum it prints is the real set of options.
 
-4. **You generate, then hand the round to the studio.** On a model choice,
-   first turn the request into a design brief: subject, hierarchy, style,
-   colours, background, what to leave out. Keep the user's own words for
-   subject and style — "give me 2 versions: 1 svg and 1 png, should look
-   good on dark and light GitHub" is instructions to Claude, not a picture
-   description, so it needs turning into an actual brief before it becomes a
-   prompt. Write the brief to a file in the scratchpad or a temp directory,
-   then run the command the block gives, once per format chosen. The default
+5. **You generate, then hand the round to the studio.** On a model choice,
+   compile the brief from the interview into the prompt file:
+
+   ```bash
+   python3 "${CLAUDE_PLUGIN_ROOT}/skills/visual/interview.py" compile \
+     --brief <brief.json> --out <path to the design brief> --remember
+   ```
+
+   It prints `prompt_file`, `flags` (add them to the generate.py command:
+   `--transparent`, `--aspect`, `--duration`), `spec_hints` (step 4) and
+   what it `stored` for next time. Exit 2 means a required slot (subject,
+   or a speech script) is empty — fill it, don't generate. Then run the
+   command the block gives, once per format chosen. The default
    is `--no-critique` here, so the round goes to the studio (below) instead
    of generate.py's own auto-critique; the block already says so, see
    "Studio loop" for everything that happens from `push` onward.
@@ -149,9 +161,84 @@ that choice.
    against /api/v1/images on a 404.
 
 Without the hook block (a direct `/clouter:visual <request>`), do the same by
-hand: run `skills/visual/catalogue.py <modality> 6` for the list, ask the
-question, then generate — with `--request-file` pointing at the user's own
+hand: run the interview, then `interview.py rank --brief <brief.json>` (or
+`skills/visual/catalogue.py <modality> 6` when ranking fails) for the list,
+ask the question, then generate — with `--request-file` pointing at the user's own
 message, written verbatim to a temp file, as described above.
+
+# Interview
+
+The prompt a generation model gets decides the result, and a short
+request leaves most of it to chance. The interview closes the gaps that
+matter before any credit is spent, and nothing else: one
+`AskUserQuestion` call, at most 4 questions, often none.
+
+**Fill the brief.** Write a JSON file in the scratchpad or a temp
+directory, one per format:
+
+```json
+{"modality": "raster_image",
+ "slots": {"subject": {"value": "a fox reading a book", "source": "given"},
+           "palette": {"value": "#0d1117 and #58a6ff", "source": "inferred"},
+           "text": {"value": "none", "source": "inferred"}}}
+```
+
+`interview.py slots <modality>` lists the slots per modality: pictures
+have subject, use, palette, text, composition, style, background (raster)
+or detail (vector), aspect and quality; video has subject, action,
+camera, setting, style, palette, duration, audio, aspect; speech has
+script, voice, tone, pace, pronunciation. Mark each value's `source`:
+`given` when the user said it, in their own words — "give me 2 versions:
+1 svg and 1 png, should look good on dark and light GitHub" is
+instructions to Claude, not a picture description, so it fills use and
+background, not subject; `inferred` when you guessed it from the request
+or the repo (README colours, an existing logo, the project's name). Infer
+wherever a reasonable guess exists; leave a slot out only when you cannot
+guess. State every value positively, as what should be there (see
+"Studio loop" on why image models paint what a brief tells them to leave
+out).
+
+**Find the gaps.**
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/visual/interview.py" gaps --brief <brief.json> [--max 4]
+```
+
+It fills empty palette, style, voice and tone slots from what this
+project answered before (`remembered`), then prints `ask`: the empty
+slots that carry weight and the inferred values that are risky to get
+wrong (colours, the exact text in a picture, a script), those that change
+the model choice first. An empty `ask` means no interview — go straight
+to the model question.
+
+**Ask once.** Every entry in `ask` is one question in a single
+`AskUserQuestion` call: its `header` and `question`, your inferred value
+(or your best guess) first and marked "(Recommended)", then up to three
+of its `options` rewritten for this request. A `cost: true` slot
+(duration, audio, quality) says in the label that the choice costs more.
+With more than one format, split `--max` so the whole interview stays at
+4 questions. When no asked slot is in `rerank_if_answered`, the model
+question(s) may go into the same call, still 4 questions in all. Write
+every answer back into the brief with source `answered`; "Other" text is
+the user's own words, keep it verbatim.
+
+**Re-rank when an answer changes the model.** When an answer lands on a
+slot in `rerank_if_answered` (text in the picture, a transparent
+background), the hook's list was ranked on the raw prompt and may no
+longer fit:
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/visual/interview.py" rank --brief <brief.json>
+```
+
+prints `options`, the numbered lines to offer in the model question in
+place of the hook's (same order and wording rules). Exit 1 means ranking
+failed; keep the hook's list.
+
+The brief is shown to the user in the report, as before, so a wrong
+guess can still be corrected in the studio. The file `compile` writes
+from it is what `--prompt-file`, `critique.py --prompt-file` and `studio.py
+push --brief-file` take.
 
 # Studio loop
 
@@ -380,6 +467,9 @@ summary.
   polling a speech generation's cost lookup (unset: 1, 2, 4, 8, 8s).
 - `CLOUTER_VISUAL_LOG` — cost log path override (default
   `visual.jsonl` next to the credentials file).
+- `CLOUTER_PREFS` — path of the store of remembered interview answers
+  per project (palette, style, voice, tone; default `prefs.json` next to
+  the credentials file).
 - `CLOUTER_LEARNED` — path of the store of values a provider rejected
   and what worked instead (default `learned.json` next to the
   credentials file, 30 days).

@@ -15,8 +15,10 @@ rule holds: Jev's pick, its confidence over the floor. Per requested
 modality the six cheapest catalogue entries go into one more Choice,
 all modalities concurrently: Jev's pick is the recommendation, the
 probabilities are the ranking. The output is hook JSON with
-additionalContext telling Claude to ask with one AskUserQuestion call,
-one question per modality, before anything else (Jev's pick first and
+additionalContext telling Claude to run interview.py's gaps check on a
+brief first (and ask what it lists, re-ranking through interview.py rank
+when an answer changes what the model must do), then to ask with one
+AskUserQuestion call, one question per modality (Jev's pick first and
 marked Recommended, then cheap to expensive, a price in every label,
 plus a stay-with-Claude option) and then run generate.py once per chosen
 model. A prompt that says transparent, transparency, alpha or "dark and
@@ -162,19 +164,30 @@ def context(prompt, picks, transparent=False, request_path=None):
                 "--session <dir>` per push in the background and follow the \"Studio loop\" "
                 "section of SKILL.md")
 
+    interview = os.path.join(HERE, "interview.py")
+
+    def interview_instruction(modality):
+        return (f"Before anything else, run the interview (\"Interview\" in SKILL.md): fill a "
+                f"brief JSON for {modality} from the request and the repo, keeping the user's own "
+                f"words (slots: python3 \"{interview}\" slots {modality}), run python3 "
+                f"\"{interview}\" gaps --brief <brief.json>, and ask every question it lists in "
+                "one AskUserQuestion call, your inferred value first and marked Recommended; "
+                "none listed means no interview. If an answer lands on a slot in its "
+                f"rerank_if_answered, run python3 \"{interview}\" rank --brief <brief.json> and "
+                "offer its options in place of the list below.")
+
     brief_instruction = (
-        "Turn the request into a design brief (subject, hierarchy, style, colours, "
-        "background, what to leave out), keeping the user's own words for subject and "
-        "style; write it to a file in the scratchpad or a temp directory."
+        f"compile the brief: python3 \"{interview}\" compile --brief <brief.json> --out "
+        "<path to the design brief> --remember, and add the flags it prints to the command."
     )
 
     if len(picks) == 1:
         modality, ranked, recommended = picks[0]
         lines = [
             f"[clouter visual] This prompt asks for a {modality.replace('_', ' ')}, which an "
-            "OpenRouter model can make for a few cents. Before anything else, ask with "
-            "AskUserQuestion (one question, header \"Model\") which model should make it, "
-            "options in exactly this order and wording:",
+            f"OpenRouter model can make for a few cents. {interview_instruction(modality)} "
+            "Then ask with AskUserQuestion (one question, header \"Model\") which model should "
+            "make it, options in exactly this order and wording:",
         ]
         lines += options(ranked, recommended)
         lines.append(
@@ -186,9 +199,10 @@ def context(prompt, picks, transparent=False, request_path=None):
     names = " and a ".join(m.replace("_", " ") for m, _, _ in picks)
     lines = [
         f"[clouter visual] This prompt asks for a {names}, which OpenRouter models can make for "
-        "a few cents each. Before anything else, ask with one AskUserQuestion call holding "
-        f"{len(picks)} questions, one per format, which model should make each, options in "
-        "exactly this order and wording:",
+        f"a few cents each. {interview_instruction('each format, one brief per format')} Keep "
+        "the interview to one call of at most 4 questions in all (gaps --max splits them). "
+        f"Then ask with one AskUserQuestion call holding {len(picks)} questions, one per "
+        "format, which model should make each, options in exactly this order and wording:",
     ]
     for modality, ranked, recommended in picks:
         lines.append(f"Question with header \"{HEADERS[modality]}\" (--modality {modality}):")

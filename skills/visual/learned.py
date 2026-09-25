@@ -126,9 +126,10 @@ def _prune(data):
     return clean
 
 
-def _write(data):
-    """Atomic replace of the file, mode 0600, dir 0700. Never raises."""
-    file_path = path()
+def _write(data, file_path=None, what="what was learned"):
+    """Atomic replace of the file (path() unless given), mode 0600, dir
+    0700. Never raises; a failure is one stderr warning naming what."""
+    file_path = file_path or path()
     try:
         directory = os.path.dirname(file_path) or "."
         os.makedirs(directory, mode=0o700, exist_ok=True)
@@ -146,7 +147,7 @@ def _write(data):
                 pass
             raise
     except Exception as e:  # noqa: BLE001 - learning must never break a generation
-        print(f"clouter visual: could not save what was learned to {file_path}: "
+        print(f"clouter visual: could not save {what} to {file_path}: "
               f"{type(e).__name__}: {e}", file=sys.stderr)
 
 
