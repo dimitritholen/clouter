@@ -8,6 +8,11 @@ voice-over and instead of Claude describing the thing in words, a real
 OpenRouter model makes it, at a price you see up front, and you steer the
 result in a browser studio until it's right.
 
+<p align="center">
+  <a href="assets/clouter-studio.png"><img src="assets/clouter-studio.png" alt="Studio with round history sidebar, video player, brief feedback and iteration controls" width="49%"></a>
+  <a href="assets/clouter-questions.png"><img src="assets/clouter-questions.png" alt="Interactive questions interface for customizing generation parameters" width="49%"></a>
+</p>
+
 ## How it works
 
 1. A hook notices the request. `skills/visual/route.py` watches every
