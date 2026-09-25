@@ -40,7 +40,17 @@
     sendBtn: document.getElementById('send-feedback-btn'),
     acceptBtn: document.getElementById('accept-btn'),
     workingBanner: document.getElementById('working-banner'),
-    acceptedBanner: document.getElementById('accepted-banner')
+    acceptedBanner: document.getElementById('accepted-banner'),
+    costTotal: document.getElementById('cost-total'),
+    costBreakdown: document.getElementById('cost-breakdown'),
+    newQuestionsPill: document.getElementById('new-questions-pill'),
+    roundView: document.getElementById('round-view'),
+    questionView: document.getElementById('question-view'),
+    questionMeta: document.getElementById('question-meta'),
+    questionMessage: document.getElementById('question-message'),
+    questionForm: document.getElementById('question-form'),
+    sendAnswersBtn: document.getElementById('send-answers-btn'),
+    answersBanner: document.getElementById('answers-banner')
   };
 
   var state = {
@@ -58,7 +68,9 @@
     acceptConfirmArmed: false,
     acceptConfirmTimer: null,
     esBackoff: 1000,
-    prevRoundCount: 0
+    prevRoundCount: 0,
+    selectedQuestions: null, // question set id shown instead of a round, or null
+    renderedQuestions: null // "id:answered" of the form on screen, so SSE updates don't wipe input
   };
 
   // ---------- small helpers ----------
@@ -128,6 +140,37 @@
 
   function feedback() {
     return (state.session && state.session.feedback) || [];
+  }
+
+  function questionSets() {
+    return (state.session && state.session.questions) || [];
+  }
+
+  function findQuestionSet(id) {
+    var qs = questionSets();
+    for (var i = 0; i < qs.length; i++) {
+      if (qs[i].id === id) return qs[i];
+    }
+    return null;
+  }
+
+  // Oldest question set still waiting for answers, or null.
+  function pendingQuestionSet() {
+    var open = questionSets().filter(function (q) { return q.answers == null; });
+    open.sort(function (a, b) { return a.id - b.id; });
+    return open[0] || null;
+  }
+
+  function formatUsd(v) {
+    return '$' + v.toFixed(v > 0 && v < 0.01 ? 4 : 2);
+  }
+
+  function roundCost(round) {
+    var total = typeof round.cost === 'number' ? round.cost : 0;
+    (round.extras || []).forEach(function (x) {
+      if (typeof x.cost === 'number') total += x.cost;
+    });
+    return total;
   }
 
   function feedbackEntriesForRound(round) {
@@ -229,14 +272,38 @@
     var prevCount = state.session ? rounds().length : 0;
     var isNewRound = session.rounds && session.rounds.length > prevCount;
     var hadSession = !!state.session;
+    var prevPending = hadSession ? pendingQuestionSet() : null;
     state.session = session;
 
     renderHeader();
     renderHistory();
     updateButtonsState();
 
-    if (!hadSession && state.selectedRound == null) {
+    var pending = pendingQuestionSet();
+    if (pending && (!prevPending || prevPending.id !== pending.id)) {
+      if (hadSession && els.feedbackText.value.trim().length > 0 && state.selectedQuestions == null) {
+        els.newQuestionsPill.hidden = false;
+      } else {
+        selectQuestions(pending.id);
+      }
+      return;
+    }
+    if (state.selectedQuestions != null) {
+      if (!isNewRound) {
+        renderQuestionView();
+        return;
+      }
       selectRound(newestRoundNumber());
+      return;
+    }
+
+    if (!hadSession && state.selectedRound == null) {
+      var qs = questionSets();
+      if (newestRoundNumber() == null && qs.length) {
+        selectQuestions(qs[qs.length - 1].id);
+      } else {
+        selectRound(newestRoundNumber());
+      }
       return;
     }
 
@@ -266,7 +333,54 @@
     els.headerRequest.title = s.request || '';
     els.headerModality.textContent = s.modality || '';
     els.headerState.textContent = s.state || '';
+    renderCost();
   }
+
+  function renderCost() {
+    var rs = rounds().slice().sort(function (a, b) { return a.n - b.n; });
+    var total = 0;
+    rs.forEach(function (r) { total += roundCost(r); });
+    els.costTotal.hidden = rs.length === 0;
+    els.costTotal.textContent = 'Spent ' + formatUsd(total);
+    els.costTotal.title = 'Everything this session has cost on OpenRouter, across ' + rs.length +
+      (rs.length === 1 ? ' round' : ' rounds') + '. Click for the breakdown.';
+
+    var rows = [];
+    rs.forEach(function (r) {
+      rows.push('<tr class="cost-round"><td>Round ' + r.n + '</td><td class="usd">' +
+        formatUsd(roundCost(r)) + '</td></tr>');
+      rows.push('<tr class="cost-line"><td>Generation · ' + escapeHtml(r.model || '') +
+        '</td><td class="usd">' + formatUsd(typeof r.cost === 'number' ? r.cost : 0) + '</td></tr>');
+      (r.extras || []).forEach(function (x) {
+        rows.push('<tr class="cost-line"><td>' + escapeHtml(x.label || '') + '</td><td class="usd">' +
+          formatUsd(typeof x.cost === 'number' ? x.cost : 0) + '</td></tr>');
+      });
+    });
+    rows.push('<tr class="cost-sum"><td>Total</td><td class="usd">' + formatUsd(total) + '</td></tr>');
+    els.costBreakdown.innerHTML = '<table>' + rows.join('') + '</table>';
+  }
+
+  els.costTotal.addEventListener('click', function (e) {
+    e.stopPropagation();
+    var open = els.costBreakdown.hidden;
+    els.costBreakdown.hidden = !open;
+    els.costTotal.setAttribute('aria-expanded', open ? 'true' : 'false');
+  });
+
+  document.addEventListener('click', function (e) {
+    if (!els.costBreakdown.hidden && !els.costBreakdown.contains(e.target)) {
+      els.costBreakdown.hidden = true;
+      els.costTotal.setAttribute('aria-expanded', 'false');
+    }
+  });
+
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'Escape' && !els.costBreakdown.hidden) {
+      els.costBreakdown.hidden = true;
+      els.costTotal.setAttribute('aria-expanded', 'false');
+      els.costTotal.focus();
+    }
+  });
 
   function thumbFor(round) {
     if (isImageType(round.media_type)) {
@@ -280,14 +394,48 @@
     return icon;
   }
 
+  function questionCard(qset) {
+    var selected = qset.id === state.selectedQuestions;
+    var card = document.createElement('button');
+    card.type = 'button';
+    card.className = 'round-card question-card' + (selected ? ' selected' : '') +
+      (qset.answers == null ? ' pending' : '');
+    card.setAttribute('aria-pressed', selected ? 'true' : 'false');
+    var thumb = document.createElement('span');
+    thumb.className = 'round-thumb';
+    thumb.textContent = '?';
+    var info = document.createElement('span');
+    info.className = 'round-info';
+    var count = qset.questions.length;
+    var sub = (qset.answers == null ? 'Waiting for you' : 'Answered') + ' · ' + count +
+      (count === 1 ? ' question' : ' questions');
+    info.innerHTML = '<span class="n">Questions</span><span class="sub">' + escapeHtml(sub) + '</span>';
+    card.appendChild(thumb);
+    card.appendChild(info);
+    card.addEventListener('click', function () { selectQuestions(qset.id); });
+    return card;
+  }
+
   function renderHistory() {
-    var rs = rounds().slice().sort(function (a, b) { return a.n - b.n; });
+    // Rounds and question sets in the order they happened.
+    var items = rounds().map(function (r) { return { kind: 'round', at: r.created || '', n: r.n, item: r }; })
+      .concat(questionSets().map(function (q) { return { kind: 'questions', at: q.created || '', n: q.id, item: q }; }));
+    items.sort(function (a, b) {
+      if (a.at !== b.at) return a.at < b.at ? -1 : 1;
+      return a.kind === b.kind ? a.n - b.n : (a.kind === 'questions' ? -1 : 1);
+    });
     els.historyStrip.innerHTML = '';
-    rs.forEach(function (round) {
+    items.forEach(function (it) {
+      if (it.kind === 'questions') {
+        els.historyStrip.appendChild(questionCard(it.item));
+        return;
+      }
+      var round = it.item;
+      var isSelected = round.n === state.selectedRound && state.selectedQuestions == null;
       var card = document.createElement('button');
       card.type = 'button';
-      card.className = 'round-card' + (round.n === state.selectedRound ? ' selected' : '');
-      card.setAttribute('aria-pressed', round.n === state.selectedRound ? 'true' : 'false');
+      card.className = 'round-card' + (isSelected ? ' selected' : '');
+      card.setAttribute('aria-pressed', isSelected ? 'true' : 'false');
 
       var thumb = document.createElement('span');
       thumb.className = 'round-thumb';
@@ -295,7 +443,7 @@
 
       var info = document.createElement('span');
       info.className = 'round-info';
-      var costText = typeof round.cost === 'number' ? ('$' + round.cost.toFixed(3)) : '';
+      var costText = typeof round.cost === 'number' ? formatUsd(roundCost(round)) : '';
       var subText = (round.model || '') + (costText ? ' · ' + costText : '');
       info.innerHTML =
         '<span class="n">Round ' + round.n + '</span>' +
@@ -318,12 +466,179 @@
     removeDefectOverlay();
 
     state.selectedRound = n;
+    state.selectedQuestions = null;
+    state.renderedQuestions = null;
+    els.questionView.hidden = true;
+    els.roundView.hidden = false;
     els.newRoundPill.hidden = true;
     resetAcceptButton();
     els.feedbackText.value = loadDraft(n);
     renderHistory();
     renderMain();
   }
+
+  function selectQuestions(id) {
+    if (state.timelineController && typeof state.timelineController.destroy === 'function') {
+      state.timelineController.destroy();
+    }
+    state.timelineController = null;
+    removeDefectOverlay();
+    state.selectedQuestions = id;
+    state.renderedQuestions = null;
+    els.newQuestionsPill.hidden = true;
+    els.roundView.hidden = true;
+    els.questionView.hidden = false;
+    renderHistory();
+    renderQuestionView();
+  }
+
+  function renderQuestionView() {
+    var qset = findQuestionSet(state.selectedQuestions);
+    if (!qset) return;
+    var answered = qset.answers != null;
+    var key = qset.id + ':' + answered;
+    els.sendAnswersBtn.hidden = answered;
+    els.answersBanner.hidden = !answered;
+    if (answered) {
+      els.answersBanner.textContent = qset.consumed
+        ? 'Answered. Claude has your answers.'
+        : 'Answers sent. Claude picks them up in a moment…';
+    }
+    if (state.renderedQuestions === key) return; // keep what the user is typing
+    state.renderedQuestions = key;
+
+    els.questionMeta.textContent = 'Questions · ' + (answered ? 'answered' : 'waiting for your answers');
+    els.questionMessage.hidden = !qset.message;
+    els.questionMessage.textContent = qset.message || '';
+    els.questionForm.innerHTML = '';
+    els.questionForm.className = 'question-form' + (answered ? ' answered' : '');
+    els.sendAnswersBtn.disabled = false;
+
+    qset.questions.forEach(function (q, qi) {
+      var given = answered ? qset.answers[qi] : null;
+      var block = document.createElement('fieldset');
+      block.className = 'question-block';
+      block.disabled = answered;
+      var legend = document.createElement('legend');
+      if (q.header) {
+        var chip = document.createElement('span');
+        chip.className = 'badge question-header';
+        chip.textContent = q.header;
+        legend.appendChild(chip);
+      }
+      var text = document.createElement('span');
+      text.className = 'question-text';
+      text.textContent = q.question;
+      legend.appendChild(text);
+      block.appendChild(legend);
+
+      var type = q.multiSelect ? 'checkbox' : 'radio';
+      var name = 'q' + qset.id + '-' + qi;
+      q.options.forEach(function (o) {
+        var row = document.createElement('label');
+        row.className = 'question-option';
+        var input = document.createElement('input');
+        input.type = type;
+        input.name = name;
+        input.value = o.label;
+        if (given) {
+          input.checked = q.multiSelect ? (given.answer || []).indexOf(o.label) !== -1 : given.answer === o.label;
+        }
+        var body = document.createElement('span');
+        body.innerHTML = '<span class="label">' + escapeHtml(o.label) + '</span>' +
+          (o.description ? '<span class="description">' + escapeHtml(o.description) + '</span>' : '');
+        row.appendChild(input);
+        row.appendChild(body);
+        block.appendChild(row);
+      });
+
+      var otherRow = document.createElement('label');
+      otherRow.className = 'question-option';
+      var otherPick = document.createElement('input');
+      otherPick.type = type;
+      otherPick.name = name;
+      otherPick.value = '__other__';
+      otherPick.dataset.other = '1';
+      var otherBody = document.createElement('span');
+      otherBody.style.flex = '1';
+      otherBody.innerHTML = '<span class="label">Other</span>';
+      var otherText = document.createElement('input');
+      otherText.type = 'text';
+      otherText.className = 'question-other';
+      otherText.placeholder = 'Your own answer…';
+      otherText.dataset.otherText = name;
+      if (given && given.other) {
+        otherPick.checked = true;
+        otherText.value = given.other;
+      }
+      otherText.addEventListener('input', function () {
+        if (otherText.value.trim()) otherPick.checked = true;
+      });
+      otherBody.appendChild(otherText);
+      otherRow.appendChild(otherPick);
+      otherRow.appendChild(otherBody);
+      block.appendChild(otherRow);
+      els.questionForm.appendChild(block);
+    });
+  }
+
+  function collectAnswers(qset) {
+    var answers = [];
+    for (var qi = 0; qi < qset.questions.length; qi++) {
+      var q = qset.questions[qi];
+      var name = 'q' + qset.id + '-' + qi;
+      var picked = Array.prototype.slice.call(
+        els.questionForm.querySelectorAll('input[name="' + name + '"]:checked'));
+      var otherBox = els.questionForm.querySelector('input[data-other-text="' + name + '"]');
+      var otherOn = picked.some(function (i) { return i.dataset.other === '1'; });
+      var other = otherOn && otherBox.value.trim() ? otherBox.value.trim() : null;
+      var labels = picked.filter(function (i) { return i.dataset.other !== '1'; })
+        .map(function (i) { return i.value; });
+      if (otherOn && !other) {
+        return { error: 'Question ' + (qi + 1) + ': type your own answer, or pick an option.' };
+      }
+      if (q.multiSelect) {
+        if (!labels.length && !other) return { error: 'Question ' + (qi + 1) + ' needs an answer.' };
+        answers.push({ answer: labels, other: other });
+      } else {
+        if (!labels.length && !other) return { error: 'Question ' + (qi + 1) + ' needs an answer.' };
+        answers.push({ answer: other ? null : labels[0], other: other });
+      }
+    }
+    return { answers: answers };
+  }
+
+  els.sendAnswersBtn.addEventListener('click', function () {
+    var qset = findQuestionSet(state.selectedQuestions);
+    if (!qset || qset.answers != null) return;
+    var collected = collectAnswers(qset);
+    if (collected.error) {
+      showError(collected.error);
+      return;
+    }
+    clearError();
+    els.sendAnswersBtn.disabled = true;
+    fetch('/api/answers', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: qset.id, answers: collected.answers })
+    })
+      .then(function (res) {
+        return res.json().then(function (data) {
+          if (!res.ok) throw new Error(data.error || ('HTTP ' + res.status));
+          return data;
+        });
+      })
+      .catch(function (err) {
+        els.sendAnswersBtn.disabled = false;
+        showError('Could not send answers: ' + err.message);
+      });
+  });
+
+  els.newQuestionsPill.addEventListener('click', function () {
+    var pending = pendingQuestionSet();
+    if (pending) selectQuestions(pending.id);
+  });
 
   function currentRound() {
     return state.selectedRound == null ? null : findRound(state.selectedRound);

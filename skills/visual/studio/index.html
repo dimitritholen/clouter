@@ -9,8 +9,18 @@
 </head>
 <body>
 <header class="header">
-  <h1 class="header-title">Clouter studio</h1>
+  <h1 class="header-title">
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcset="/static/logo-dark.png">
+      <img class="header-logo" src="/static/logo-light.png" alt="Clouter" width="118" height="32">
+    </picture>
+    <span class="header-product">studio</span>
+  </h1>
   <div class="header-meta">
+    <div class="cost-total-wrap">
+      <button id="cost-total" class="cost-total" type="button" aria-expanded="false" aria-controls="cost-breakdown" hidden>Spent $0.00</button>
+      <div id="cost-breakdown" class="cost-breakdown" hidden></div>
+    </div>
     <span id="header-request" class="header-request" title=""></span>
     <span id="header-modality" class="badge"></span>
     <span id="header-state" class="badge"></span>
@@ -27,9 +37,20 @@
   <nav class="history" aria-label="Rounds">
     <div id="history-strip" class="history-strip"></div>
     <button id="new-round-pill" class="pill" type="button" hidden>New round available</button>
+    <button id="new-questions-pill" class="pill" type="button" hidden>Claude has questions for you</button>
   </nav>
 
-  <section class="main-view" aria-label="Selected round">
+  <section id="question-view" class="main-view question-view" aria-label="Questions" hidden>
+    <div id="question-meta" class="round-meta"></div>
+    <div id="question-message" class="question-message" hidden></div>
+    <form id="question-form" class="question-form"></form>
+    <div class="actions">
+      <button id="send-answers-btn" type="button" class="btn btn-primary">Send answers</button>
+    </div>
+    <p id="answers-banner" class="working-banner" hidden></p>
+  </section>
+
+  <section id="round-view" class="main-view" aria-label="Selected round">
     <div id="round-meta" class="round-meta"></div>
     <div id="media-view" class="media-view"></div>
     <details id="brief-details" class="brief-details">

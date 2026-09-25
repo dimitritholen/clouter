@@ -15,10 +15,11 @@ rule holds: Jev's pick, its confidence over the floor. Per requested
 modality the six cheapest catalogue entries go into one more Choice,
 all modalities concurrently: Jev's pick is the recommendation, the
 probabilities are the ranking. The output is hook JSON with
-additionalContext telling Claude to run interview.py's gaps check on a
-brief first (and ask what it lists, re-ranking through interview.py rank
-when an answer changes what the model must do), then to ask with one
-AskUserQuestion call, one question per modality (Jev's pick first and
+additionalContext telling Claude to ask every question in the studio
+page (studio.py ask, then wait; AskUserQuestion only when the studio
+cannot start), to run interview.py's gaps check on a brief first (and ask what it lists, re-ranking through interview.py rank
+when an answer changes what the model must do), then to ask one
+question set, one question per modality (Jev's pick first and
 marked Recommended, then cheap to expensive, a price in every label,
 plus a stay-with-Claude option) and then run generate.py once per chosen
 model. A prompt that says transparent, transparency, alpha or "dark and
@@ -150,7 +151,7 @@ def context(prompt, picks, transparent=False, request_path=None):
         suggest = (f"; {PY} \"{critique}\" <file> --prompt-file <path to the design brief> "
                    "--suggest --model <chosen id> --out <defects.json>") if visual else ""
         defects = " --defects-file <defects.json>" if visual else ""
-        push = (f"{PY} \"{studio}\" push --file <file> --model <chosen id> --cost <cost> "
+        push = (f"{PY} \"{studio}\" push --session <dir> --file <file> --model <chosen id> --cost <cost> "
                 f"--brief-file <path to the design brief> --request-file <path> "
                 f"--modality {modality}{defects} [--message-file <note>]")
         return (f"{suggest}; then {push}; then `studio.py wait --session <dir>` in the "
@@ -161,20 +162,26 @@ def context(prompt, picks, transparent=False, request_path=None):
         modality varies per question rather than being known up front."""
         return (f"; for raster_image/vector_svg formats also run {PY} \"{critique}\" "
                 "<file> --prompt-file <brief> --suggest --model <chosen id> --out <defects.json>; then run "
-                f"{PY} \"{studio}\" push --file <file> --model <chosen id> --cost <cost> "
+                f"{PY} \"{studio}\" push --session <dir> --file <file> --model <chosen id> --cost <cost> "
                 "--brief-file <brief> --request-file <path> --modality <its --modality> "
                 "(--defects-file <defects.json> for raster/vector) [--message-file <note>]; then run `studio.py wait "
                 "--session <dir>` per push in the background and follow the \"Studio loop\" "
                 "section of SKILL.md")
 
     interview = os.path.join(HERE, "interview.py")
+    ask_note = (f"Ask every question in the studio page, not the terminal (\"Asking the user\" in "
+                f"SKILL.md): write it as AskUserQuestion-shaped JSON, run {PY} \"{studio}\" ask "
+                f"--questions-file <q.json>{request_flag} --modality <modality> (later calls add "
+                "--session <dir> instead, and so does every push), tell the user the url once, "
+                f"then `studio.py wait --session <dir>` in the background for the answers. Only "
+                "when ask exits non-zero, ask with AskUserQuestion in the terminal.")
 
     def interview_instruction(modality):
         return (f"Before anything else, run the interview (\"Interview\" in SKILL.md): fill a "
                 f"brief JSON for {modality} from the request and the repo, keeping the user's own "
                 f"words (slots: {PY} \"{interview}\" slots {modality}), run {PY} "
                 f"\"{interview}\" gaps --brief <brief.json>, and ask every question it lists in "
-                "one AskUserQuestion call, your inferred value first and marked Recommended; "
+                "one question set, your inferred value first and marked Recommended; "
                 "none listed means no interview. If an answer lands on a slot in its "
                 f"rerank_if_answered, run {PY} \"{interview}\" rank --brief <brief.json> and "
                 "offer its options in place of the list below.")
@@ -188,9 +195,9 @@ def context(prompt, picks, transparent=False, request_path=None):
         modality, ranked, recommended = picks[0]
         lines = [
             f"[clouter visual] This prompt asks for a {modality.replace('_', ' ')}, which an "
-            f"OpenRouter model can make for a few cents. {interview_instruction(modality)} "
-            "Then ask with AskUserQuestion (one question, header \"Model\") which model should "
-            "make it, options in exactly this order and wording:",
+            f"OpenRouter model can make for a few cents. {ask_note} "
+            f"{interview_instruction(modality)} Then ask (one question, header \"Model\") "
+            "which model should make it, options in exactly this order and wording:",
         ]
         lines += options(ranked, recommended)
         lines.append(
@@ -202,9 +209,10 @@ def context(prompt, picks, transparent=False, request_path=None):
     names = " and a ".join(m.replace("_", " ") for m, _, _ in picks)
     lines = [
         f"[clouter visual] This prompt asks for a {names}, which OpenRouter models can make for "
-        f"a few cents each. {interview_instruction('each format, one brief per format')} Keep "
-        "the interview to one call of at most 4 questions in all (gaps --max splits them). "
-        f"Then ask with one AskUserQuestion call holding {len(picks)} questions, one per "
+        f"a few cents each. {ask_note} "
+        f"{interview_instruction('each format, one brief per format')} Keep "
+        "the interview to one question set of at most 4 questions in all (gaps --max splits "
+        f"them). Then ask with one question set holding {len(picks)} questions, one per "
         "format, which model should make each, options in exactly this order and wording:",
     ]
     for modality, ranked, recommended in picks:
