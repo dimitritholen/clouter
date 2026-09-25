@@ -14,6 +14,7 @@ S="$work/session"
 cleanup() {
   "$SCRIPT" stop --session "$S" >/dev/null 2>&1
   [ -n "${S2:-}" ] && "$SCRIPT" stop --session "$S2" >/dev/null 2>&1
+  [ -n "${S3:-}" ] && "$SCRIPT" stop --session "$S3" >/dev/null 2>&1
   [ -n "${or_server_pid:-}" ] && kill "$or_server_pid" 2>/dev/null
   rm -rf "$work"
 }
@@ -375,6 +376,104 @@ check_eq "wait: model as sent" "$(jget "$out" 'd["model"]')" "stub/alt-a"
 printf '{"round": 1, "model": "unknown/nope"}' > "$work/fb-model-bad.json"
 resp=$(http POST /api/feedback "$work/fb-model-bad.json" application/json)
 check_eq "feedback with unknown model id: 400" "${resp%% *}" "400"
+
+# --- ask: a question set before any round, answered in the page ------------
+S3="$work/session-questions"
+MAIN_URL="$URL"
+cat > "$work/questions.json" <<'EOF_Q'
+{"questions": [
+ {"header": "Colours", "question": "Which colours?", "multiSelect": false,
+  "options": [{"label": "Brand blue (Recommended)", "description": "#58a6ff"}, {"label": "Monochrome"}]},
+ {"header": "Formats", "question": "Which formats?", "multiSelect": true,
+  "options": [{"label": "SVG", "description": ""}, {"label": "PNG", "description": ""}]}]}
+EOF_Q
+printf 'Two details before the first round.' > "$work/q-note.txt"
+"$SCRIPT" ask --session "$S3" --questions-file "$work/questions.json" >/dev/null 2>"$work/stderr"
+check_code "ask on a new session without --request-file: exit 2" "$?" 2
+printf '{"questions": [{"question": "Only one option?", "options": [{"label": "Yes"}]}]}' > "$work/bad-q.json"
+"$SCRIPT" ask --session "$S3" --questions-file "$work/bad-q.json" --request-file "$work/request.txt" --modality vector_svg >/dev/null 2>"$work/stderr"
+check_code "ask with a one-option question: exit 2" "$?" 2
+check_eq "ask with a one-option question: says why" "$(grep -c '2 to 4 options' "$work/stderr")" "1"
+out=$("$SCRIPT" ask --session "$S3" --questions-file "$work/questions.json" --message-file "$work/q-note.txt" \
+  --request-file "$work/request.txt" --modality vector_svg 2>"$work/stderr")
+check_code "ask: exit 0" "$?" 0
+check_eq "ask: question set 1" "$(jget "$out" 'd["questions"]')" "1"
+URL=$(jget "$out" 'd["url"]')
+session=$(cat "$S3/session.json")
+check_eq "ask: session state asking, no rounds" "$(jget "$session" 'd["state"], len(d["rounds"])')" "('asking', 0)"
+check_eq "ask: note and options stored" "$(jget "$session" 'd["questions"][0]["message"], d["questions"][0]["questions"][0]["options"][1]')" "('Two details before the first round.', {'label': 'Monochrome', 'description': ''})"
+"$SCRIPT" wait --session "$S3" --timeout 1 >/dev/null 2>"$work/stderr"
+check_code "wait before any answer: timeout 20" "$?" 20
+
+printf '{"id": 1, "answers": [{"answer": "Monochrome", "other": null}, {"answer": [], "other": null}]}' > "$work/a.json"
+resp=$(http POST /api/answers "$work/a.json" application/json)
+check_eq "answers with an empty multi-select: 400" "${resp%% *}" "400"
+printf '{"id": 1, "answers": [{"answer": "Purple", "other": null}, {"answer": ["SVG"], "other": null}]}' > "$work/a.json"
+resp=$(http POST /api/answers "$work/a.json" application/json)
+check_eq "answers with an unknown label: 400" "${resp%% *}" "400"
+printf '{"id": 1, "answers": [{"answer": "Monochrome", "other": "only greys"}, {"answer": ["SVG"], "other": null}]}' > "$work/a.json"
+resp=$(http POST /api/answers "$work/a.json" application/json)
+check_eq "answers with both a label and Other on a single choice: 400" "${resp%% *}" "400"
+printf '{"id": 7, "answers": []}' > "$work/a.json"
+resp=$(http POST /api/answers "$work/a.json" application/json)
+check_eq "answers to an unknown set: 400" "${resp%% *}" "400"
+printf '{"id": 1, "answers": [{"answer": [], "other": null}, {"answer": ["SVG"], "other": null}]}' > "$work/a.json"
+resp=$(http POST /api/answers "$work/a.json" application/json)
+check_eq "answers with a list on a single choice: 400, not a dropped connection" "${resp%% *}" "400"
+printf '{"id": 1, "answers": [{"answer": "Monochrome", "other": null}, {"answer": [["SVG"]], "other": null}]}' > "$work/a.json"
+resp=$(http POST /api/answers "$work/a.json" application/json)
+check_eq "answers with a nested list on a multi-select: 400" "${resp%% *}" "400"
+printf '{"id": 1, "answers": [{"answer": null, "other": "only greys"}, {"answer": ["SVG", "PNG"], "other": "and a WebP"}]}' > "$work/a.json"
+resp=$(http POST /api/answers "$work/a.json" application/json)
+check_eq "answers: 200" "${resp%% *}" "200"
+resp=$(http POST /api/answers "$work/a.json" application/json)
+check_eq "answers twice: 409" "${resp%% *}" "409"
+out=$("$SCRIPT" wait --session "$S3" --timeout 5 2>"$work/stderr")
+check_code "wait after answers: exit 0" "$?" 0
+check_eq "wait: action answers" "$(jget "$out" 'd["action"], d["id"]')" "('answers', 1)"
+check_eq "wait: Other text verbatim" "$(jget "$out" 'd["answers"][0]["answer"], d["answers"][0]["other"]')" "(None, 'only greys')"
+check_eq "wait: multi-select labels and question echoed" "$(jget "$out" 'd["answers"][1]["answer"], d["answers"][1]["question"]')" "(['SVG', 'PNG'], 'Which formats?')"
+"$SCRIPT" wait --session "$S3" --timeout 1 >/dev/null 2>"$work/stderr"
+check_code "answers are consumed once: next wait times out" "$?" 20
+
+# --- push --extra on the question session: costs besides the generation -----
+"$SCRIPT" push --session "$S3" --file "$work/one.png" --model test/model --cost 0.03 \
+  --brief-file "$work/brief.txt" --extra "critic=0.004" --extra "voice-over (TTS)=0.002" >/dev/null 2>"$work/stderr"
+check_code "push --extra: exit 0" "$?" 0
+check_eq "push --extra: stored on the round" "$(jget "$(cat "$S3/session.json")" 'd["rounds"][0]["extras"]')" "[{'label': 'critic', 'cost': 0.004}, {'label': 'voice-over (TTS)', 'cost': 0.002}]"
+check_eq "push --extra: questions kept beside the round" "$(jget "$(cat "$S3/session.json")" 'len(d["questions"]), len(d["rounds"])')" "(1, 1)"
+"$SCRIPT" push --session "$S3" --file "$work/one.png" --model test/model --cost 0.03 \
+  --brief-file "$work/brief.txt" --extra "no-amount" >/dev/null 2>"$work/stderr"
+check_code "push --extra without =usd: exit 2" "$?" 2
+for bad in "critic=nan" "critic=inf" "critic=-0.01"; do
+  "$SCRIPT" push --session "$S3" --file "$work/one.png" --model test/model --cost 0.03 \
+    --brief-file "$work/brief.txt" --extra "$bad" >/dev/null 2>"$work/stderr"
+  check_code "push --extra $bad: exit 2" "$?" 2
+done
+"$SCRIPT" push --session "$S3" --file "$work/one.png" --model test/model --cost nan \
+  --brief-file "$work/brief.txt" >/dev/null 2>"$work/stderr"
+check_code "push --cost nan: exit 2" "$?" 2
+python3 -c 'import json,sys; json.loads(open(sys.argv[1]).read(), parse_constant=lambda c: sys.exit("non-finite " + c))' "$S3/session.json"
+check_code "session.json holds no NaN or Infinity" "$?" 0
+
+# --- one session, two formats: every round keeps its own modality ----------
+"$SCRIPT" push --session "$S3" --file "$work/one.png" --model test/model --cost 0.03 \
+  --brief-file "$work/brief.txt" --modality raster_image >/dev/null 2>"$work/stderr"
+check_code "push a second format into the question session: exit 0" "$?" 0
+check_eq "rounds keep their own modality" "$(jget "$(cat "$S3/session.json")" '[r["modality"] for r in d["rounds"]], d["modality"]')" "(['vector_svg', 'raster_image'], 'vector_svg')"
+resp=$(http GET "/api/catalogue?modality=hologram")
+check_eq "GET /api/catalogue with an unknown modality: 400" "${resp%% *}" "400"
+
+# --- the plugin's logos are served from assets/ ----------------------------
+resp=$(http GET /static/logo-dark.png)
+check_eq "GET /static/logo-dark.png: 200" "${resp%% *}" "200"
+resp=$(http GET /static/logo-light.png)
+check_eq "GET /static/logo-light.png: 200" "${resp%% *}" "200"
+resp=$(http GET /static/logo-other.png)
+check_eq "GET /static/logo-other.png: 404" "${resp%% *}" "404"
+check_eq "index.html: light logo, dark logo under prefers-color-scheme dark" "$(grep -c 'media="(prefers-color-scheme: dark)" srcset="/static/logo-dark.png"' "$ROOT/skills/visual/studio/index.html")/$(grep -c 'src="/static/logo-light.png"' "$ROOT/skills/visual/studio/index.html")" "1/1"
+"$SCRIPT" stop --session "$S3" >/dev/null 2>&1
+URL="$MAIN_URL"
 
 # --- stop, then wait reports server gone ------------------------------------
 pid=$(jget "$(cat "$S/server.json")" 'd["pid"]')

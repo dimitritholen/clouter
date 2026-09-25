@@ -5,13 +5,25 @@
     studio.py push   --session <dir> --file <path> --model <id> --cost <usd>
                      --brief-file <path> [--defects-file <json>] [--message-file <path>]
                      [--parent <n>] [--request-file <path>] [--modality <m>]
+                     [--extra <label>=<usd> ...]
+    studio.py ask    --session <dir> --questions-file <json> [--message-file <path>]
+                     [--request-file <path>] [--modality <m>]
     studio.py wait   --session <dir> [--timeout <seconds>]
     studio.py stop   --session <dir>
     studio.py status --session <dir>
 
 Claude drives the loop: `push` copies a generated file into the session
-as the next round and makes sure a server is running; `wait` blocks
-until the user sends feedback or accepts in the browser. --session
+as the next round and makes sure a server is running; `ask` adds a
+question set (the interview, the model pick, any question mid-loop) that
+the user answers in the page instead of the terminal; `wait` blocks
+until the user answers, sends feedback or accepts in the browser.
+
+A questions file has AskUserQuestion's shape: {"questions": [{"header",
+"question", "multiSelect", "options": [{"label", "description"}]}]}, 1
+to 4 questions of 2 to 4 options each; the page adds an "Other" field to
+every question. `push --extra label=usd` (repeatable) records what a
+round cost besides the generation itself (critic, voice-over, music);
+the page header sums every round's cost and extras. --session
 defaults to $CLOUTER_STUDIO_DIR; `push` without either creates
 ~/.cache/clouter/studio/<session-id>.
 
@@ -29,17 +41,23 @@ each other's writes.
 
 The server binds 127.0.0.1 on a free port (ThreadingHTTPServer) and
 serves the page from studio/ next to this file (index.html at /, the
-rest under /static/, whitelisted names only), GET /api/session,
+rest under /static/, whitelisted names only, plus the plugin's two logo
+files from assets/), GET /api/session,
 GET /events (SSE: `event: session` with the full session on connect and
 on every change of session.json, polled every 0.5 s; `: ping` every
 15 s), GET /files/<relpath> (only under rounds/ or uploads/, anything
 else 404), POST /api/upload?kind=annotation|frame (raw PNG, max 20 MB),
 POST /api/feedback (accepts an optional "model" id for the next round),
+POST /api/answers {"id": <question set>, "answers": [{"answer": <label or
+[labels]>, "other": <text or null>}, ...]} (one per question, in order),
 POST /api/accept, POST /api/models {"round": n} (202, asks
 critique.model_options in a background thread for alternative generator
 models and stores them on the round; 409 while one is already pending)
-and GET /api/catalogue (every catalogue model for the session's
-modality, cached in memory for 10 minutes). JSON errors are
+and GET /api/catalogue[?modality=<m>] (every catalogue model for that
+modality, default the session's, cached in memory per modality for 10
+minutes). Every round records its own modality: a session shared by an
+SVG and a PNG (one interview, two formats) keeps model suggestions and
+the catalogue check per round's format. JSON errors are
 {"error": "..."} with a 4xx status. The server exits after
 --idle-minutes without an SSE client, or 60 s after an accept, and
 removes server.json on exit.
@@ -49,8 +67,12 @@ via /proc/version) `wslview`, then `explorer.exe`, else the webbrowser
 module; a failure to open never stops the server. `push` passes
 --no-open through when CLOUTER_STUDIO_NO_OPEN=1.
 
-`push` prints {"round": n, "url": "...", "session": "<dir>"}. `wait`
-prints the oldest unconsumed feedback entry (marked consumed) with
+`push` prints {"round": n, "url": "...", "session": "<dir>"}; `ask`
+prints {"questions": id, "url": "...", "session": "<dir>"}. `wait`
+first prints an answered, unconsumed question set as {"action":
+"answers", "id", "answers": [{"header", "question", "answer", "other"}]}
+(marked consumed, exit 0), else the oldest unconsumed feedback entry
+(marked consumed) with
 annotation, markers[].frame and "round_file" as absolute paths. If
 there is no unconsumed entry but the session state is "accepted" (the
 accept was already consumed by an earlier `wait`), it reprints the
@@ -66,6 +88,7 @@ import contextlib
 import datetime
 import http.server
 import json
+import math
 import mimetypes
 import os
 import re
@@ -93,6 +116,10 @@ DETACH = ({"creationflags": subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(HERE, "studio")
 STATIC_FILES = ("index.html", "studio.css", "app.js", "editor.js", "timeline.js")
+ASSETS_DIR = os.path.join(os.path.dirname(os.path.dirname(HERE)), "assets")
+STATIC_ASSETS = ("logo-dark.png", "logo-light.png")  # served from the plugin's assets/
+MAX_QUESTIONS = 4
+MAX_OPTIONS = 4
 MODALITIES = ("raster_image", "vector_svg", "video", "speech")
 UPLOAD_KINDS = ("annotation", "frame")
 MAX_UPLOAD = 20 * 1024 * 1024
@@ -113,7 +140,7 @@ MEDIA_EXT = {
 EXT_MEDIA = {ext: media for media, ext in MEDIA_EXT.items()}
 EXT_MEDIA.update({"jpeg": "image/jpeg", "oga": "audio/ogg"})
 STATIC_TYPES = {".html": "text/html; charset=utf-8", ".css": "text/css; charset=utf-8",
-                ".js": "text/javascript; charset=utf-8"}
+                ".js": "text/javascript; charset=utf-8", ".png": "image/png"}
 
 
 class UsageError(Exception):
@@ -295,7 +322,7 @@ class Studio:
         self.stopping = threading.Event()
         self.mtime = self._mtime()
         self.catalogue_lock = threading.Lock()
-        self.catalogue_cache = None  # (modality, expiry_monotonic, entries) or None
+        self.catalogue_cache = {}  # modality -> (expiry_monotonic, entries)
 
     def _mtime(self):
         try:
@@ -413,7 +440,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if path == "/api/session":
                 return self.send_json(load_session(self.studio.dir))
             if path == "/api/catalogue":
-                return self.get_catalogue()
+                return self.get_catalogue(urllib.parse.parse_qs(url.query))
             if path == "/events":
                 return self.get_events()
             if path.startswith("/files/"):
@@ -425,9 +452,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return self.send_error_json(404, "not found")
 
     def get_static(self, name):
-        if name not in STATIC_FILES:
+        if name not in STATIC_FILES and name not in STATIC_ASSETS:
             return self.send_error_json(404, "not found")
-        path = os.path.join(STATIC_DIR, name)
+        path = os.path.join(ASSETS_DIR if name in STATIC_ASSETS else STATIC_DIR, name)
         if not os.path.isfile(path):
             return self.send_error_json(404, "not found")
         return self.send_file(path, STATIC_TYPES[os.path.splitext(name)[1]])
@@ -442,16 +469,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.send_error_json(404, "not found")
         return self.send_file(os.path.realpath(full), content_type(full))
 
-    def get_catalogue(self):
+    def get_catalogue(self, query):
+        """?modality= picks the list for one round's format in a session that
+        holds several; without it, the session's own modality."""
         studio = self.studio
-        try:
-            modality = load_session(studio.dir).get("modality")
-        except (OSError, ValueError) as e:
-            return self.send_error_json(500, f"cannot read session: {e}")
+        modality = (query.get("modality") or [None])[0]
+        if modality is not None and modality not in MODALITIES:
+            return self.send_error_json(400, "unknown modality")
+        if modality is None:
+            try:
+                modality = load_session(studio.dir).get("modality")
+            except (OSError, ValueError) as e:
+                return self.send_error_json(500, f"cannot read session: {e}")
         with studio.catalogue_lock:
-            cached = studio.catalogue_cache
-            if cached and cached[0] == modality and time.monotonic() < cached[1]:
-                return self.send_json({"models": cached[2]})
+            cached = studio.catalogue_cache.get(modality)
+            if cached and time.monotonic() < cached[0]:
+                return self.send_json({"models": cached[1]})
         catalogue = _import_catalogue()
         try:
             found = catalogue.models(modality)
@@ -462,7 +495,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
               "reference_supported": bool(e.get("reference_supported"))} for e in found),
             key=lambda e: (e["price"] is None, e["price"] if e["price"] is not None else 0.0))
         with studio.catalogue_lock:
-            studio.catalogue_cache = (modality, time.monotonic() + CATALOGUE_TTL_SECONDS, entries)
+            studio.catalogue_cache[modality] = (time.monotonic() + CATALOGUE_TTL_SECONDS, entries)
         return self.send_json({"models": entries})
 
     def get_events(self):
@@ -515,6 +548,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 return self.post_entry("feedback")
             if url.path == "/api/accept":
                 return self.post_entry("accept")
+            if url.path == "/api/answers":
+                return self.post_answers()
             if url.path == "/api/models":
                 return self.post_models()
         except (BrokenPipeError, ConnectionResetError):
@@ -564,10 +599,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             return self.send_error_json(400, "body must be a JSON object")
         d = self.studio.dir
         with self.studio.catalogue_lock:
-            cached = self.studio.catalogue_cache
-        catalogue_ids = {m["id"] for m in cached[2]} if cached else None
+            cache = dict(self.studio.catalogue_cache)
         with locked(d):
             session = load_session(d)
+            cached = cache.get(round_modality(session, body.get("round")))
+            catalogue_ids = {m["id"] for m in cached[1]} if cached else None
             try:
                 entry = build_entry(d, session, action, body, catalogue_ids=catalogue_ids)
             except ValueError as e:
@@ -577,6 +613,34 @@ class Handler(http.server.BaseHTTPRequestHandler):
             save_session(d, session)
         self.studio.changed()
         return self.send_json({"id": entry["id"]})
+
+    def post_answers(self):
+        length = self.content_length(MAX_JSON)
+        if length is None:
+            return None
+        try:
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except ValueError:
+            return self.send_error_json(400, "body is not JSON")
+        if not isinstance(body, dict):
+            return self.send_error_json(400, "body must be a JSON object")
+        d = self.studio.dir
+        with locked(d):
+            session = load_session(d)
+            qset = next((q for q in session.get("questions", []) if q.get("id") == body.get("id")), None)
+            if qset is None or isinstance(body.get("id"), bool):
+                return self.send_error_json(400, "id must be an existing question set")
+            if qset.get("answers") is not None:
+                return self.send_error_json(409, "this question set is already answered")
+            try:
+                qset["answers"] = build_answers(qset["questions"], body.get("answers"))
+            except ValueError as e:
+                return self.send_error_json(400, str(e))
+            qset["answered"] = now_iso()
+            session["state"] = "answered"
+            save_session(d, session)
+        self.studio.changed()
+        return self.send_json({"id": qset["id"]})
 
     def post_models(self):
         length = self.content_length(MAX_JSON)
@@ -605,6 +669,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return self.send_json({"status": "pending"}, 202)
 
 
+def round_modality(session, n):
+    """The format of round n: its own, else the session's (older rounds and
+    single-format sessions carry none of their own)."""
+    round_ = next((r for r in session.get("rounds", []) if r.get("n") == n), None)
+    return (round_ or {}).get("modality") or session.get("modality")
+
+
 def run_model_options(d, studio, n):
     """Background thread body for POST /api/models: rank alternative generator
     models for round n and write them to session.json, notifying over SSE."""
@@ -616,7 +687,7 @@ def run_model_options(d, studio, n):
         exclude = {r.get("model") for r in session.get("rounds", []) if r.get("model")}
         key = critique.keys.get("OPENROUTER_API_KEY")  # raises MissingKey/UnsafeFile
         found = critique.model_options(
-            session.get("modality"), round_.get("brief") or "", request=session.get("request"),
+            round_modality(session, n), round_.get("brief") or "", request=session.get("request"),
             defects=round_.get("defects"), exclude=exclude, key=key)
     except Exception as e:  # noqa: BLE001 - any failure is reported to the page, never crashes the thread
         error = str(e)
@@ -641,6 +712,74 @@ def run_model_options(d, studio, n):
         session["models_request"] = {"round": n, "status": "done"}
         save_session(d, session)
     studio.changed()
+
+
+def parse_questions(data):
+    """Validate a questions file (AskUserQuestion's shape) into the stored
+    form; UsageError on bad input."""
+    questions = data.get("questions") if isinstance(data, dict) else data
+    if not isinstance(questions, list) or not 1 <= len(questions) <= MAX_QUESTIONS:
+        raise UsageError(f"questions file must hold 1 to {MAX_QUESTIONS} questions")
+    out = []
+    for i, q in enumerate(questions, 1):
+        if not isinstance(q, dict) or not isinstance(q.get("question"), str) or not q["question"].strip():
+            raise UsageError(f"question {i} needs a question text")
+        options = q.get("options")
+        if not isinstance(options, list) or not 2 <= len(options) <= MAX_OPTIONS:
+            raise UsageError(f"question {i} needs 2 to {MAX_OPTIONS} options")
+        opts = []
+        for o in options:
+            if not isinstance(o, dict) or not isinstance(o.get("label"), str) or not o["label"].strip():
+                raise UsageError(f"question {i}: every option needs a label")
+            opts.append({"label": o["label"], "description": str(o.get("description") or "")})
+        if len({o["label"] for o in opts}) != len(opts):
+            raise UsageError(f"question {i}: option labels must differ")
+        out.append({"header": str(q.get("header") or ""), "question": q["question"],
+                    "multiSelect": bool(q.get("multiSelect")), "options": opts})
+    return out
+
+
+def build_answers(questions, answers):
+    """Validate POSTed answers against their question set; ValueError on bad input."""
+    if not isinstance(answers, list) or len(answers) != len(questions):
+        raise ValueError(f"answers must be a list of {len(questions)} entries, one per question")
+    out = []
+    for i, (q, a) in enumerate(zip(questions, answers), 1):
+        if not isinstance(a, dict):
+            raise ValueError(f"answer {i} must be an object")
+        labels = {o["label"] for o in q["options"]}
+        answer = a.get("answer")
+        other = a.get("other")
+        if other is not None and (not isinstance(other, str) or not other.strip()):
+            raise ValueError(f"answer {i}: other must be non-empty text or null")
+        if q["multiSelect"]:
+            answer = answer or []
+            if not isinstance(answer, list) or not all(isinstance(x, str) and x in labels for x in answer):
+                raise ValueError(f"answer {i} must be a list of this question's option labels")
+            if not answer and other is None:
+                raise ValueError(f"answer {i}: pick at least one option or fill in Other")
+        else:
+            if answer is not None and (not isinstance(answer, str) or answer not in labels):
+                raise ValueError(f"answer {i} must be one of this question's option labels")
+            if (answer is None) == (other is None):
+                raise ValueError(f"answer {i}: pick exactly one option or fill in Other")
+        out.append({"answer": answer, "other": other})
+    return out
+
+
+def parse_extras(values):
+    """[--extra label=usd] into [{"label", "cost"}]; UsageError on bad input."""
+    extras = []
+    for raw in values or []:
+        label, sep, cost = raw.rpartition("=")
+        try:
+            value = float(cost)
+        except ValueError:
+            value = None
+        if not sep or not label.strip() or value is None or not math.isfinite(value) or value < 0:
+            raise UsageError(f"--extra {raw!r}: use label=usd, such as voice-over=0.002")
+        extras.append({"label": label.strip(), "cost": value})
+    return extras
 
 
 def build_entry(d, session, action, body, catalogue_ids=None):
@@ -816,10 +955,63 @@ def start_server(d):
     return None
 
 
-def push(args):
-    d = os.path.abspath(args.session) if args.session else os.path.join(
+def session_dir(args):
+    """--session, or a fresh ~/.cache/clouter/studio/<session-id>."""
+    return os.path.abspath(args.session) if args.session else os.path.join(
         os.path.expanduser("~/.cache/clouter/studio"),
         datetime.datetime.now().strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6])
+
+
+def open_session(d, request, modality):
+    """The session at d, or a new one; call with the lock held."""
+    if os.path.isfile(session_path(d)):
+        return load_session(d)
+    if request is None or not modality:
+        raise UsageError("a new session needs --request-file and --modality")
+    return {"version": 1, "request": request, "modality": modality,
+            "state": "waiting", "rounds": [], "feedback": [], "questions": []}
+
+
+def started(d, printed):
+    """Start the server, print the JSON line with its url; exit code."""
+    url = start_server(d)
+    print(json.dumps(dict(printed, url=url, session=d)))
+    if not url:
+        print(f"studio: server did not start within {SERVER_START_SECONDS} s, see "
+              f"{os.path.join(d, 'server.log')}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def ask(args):
+    d = session_dir(args)
+    try:
+        data = json.loads(read_text(args.questions_file, "questions file"))
+    except ValueError:
+        raise UsageError(f"questions file {args.questions_file} is not JSON") from None
+    questions = parse_questions(data)
+    message = read_text(args.message_file, "message file") if args.message_file else None
+    request = read_text(args.request_file, "request file") if args.request_file else None
+    os.makedirs(d, exist_ok=True)
+    with locked(d):
+        session = open_session(d, request, args.modality)
+        sets = session.setdefault("questions", [])
+        qid = max((q.get("id", 0) for q in sets), default=0) + 1
+        entry = {"id": qid, "questions": questions, "answers": None, "created": now_iso(),
+                 "consumed": False}
+        if message is not None:
+            entry["message"] = message
+        sets.append(entry)
+        session["state"] = "asking"
+        save_session(d, session)
+    return started(d, {"questions": qid})
+
+
+def push(args):
+    d = session_dir(args)
+    extras = parse_extras(args.extra)
+    if not math.isfinite(args.cost) or args.cost < 0:
+        raise UsageError(f"--cost {args.cost}: must be a finite amount of 0 or more")
     if not os.path.isfile(args.file):
         raise UsageError(f"no such file {args.file}")
     media_type = guess_media_type(args.file)
@@ -849,13 +1041,7 @@ def push(args):
     os.makedirs(os.path.join(d, "rounds"), exist_ok=True)
     os.makedirs(os.path.join(d, "uploads"), exist_ok=True)
     with locked(d):
-        if os.path.isfile(session_path(d)):
-            session = load_session(d)
-        else:
-            if request is None or not args.modality:
-                raise UsageError("a new session needs --request-file and --modality")
-            session = {"version": 1, "request": request, "modality": args.modality,
-                       "state": "waiting", "rounds": [], "feedback": []}
+        session = open_session(d, request, args.modality)
         rounds = session.setdefault("rounds", [])
         if args.parent is not None and args.parent not in {r.get("n") for r in rounds}:
             raise UsageError(f"--parent {args.parent} is not an existing round")
@@ -863,10 +1049,12 @@ def push(args):
         rel = f"rounds/round-{n}.{MEDIA_EXT[media_type]}"
         shutil.copyfile(args.file, os.path.join(d, rel))
         round_entry = {"n": n, "file": rel, "media_type": media_type, "model": args.model,
-                       "cost": args.cost, "brief": brief, "parent": args.parent,
+                       "modality": args.modality or session.get("modality"), "cost": args.cost, "brief": brief, "parent": args.parent,
                        "defects": defects, "created": now_iso()}
         if message is not None:
             round_entry["message"] = message
+        if extras:
+            round_entry["extras"] = extras
         if summary is not None:
             round_entry["summary"] = summary
         if model_trouble is not None:
@@ -878,13 +1066,7 @@ def push(args):
         rounds.append(round_entry)
         session["state"] = "waiting"
         save_session(d, session)
-    url = start_server(d)
-    print(json.dumps({"round": n, "url": url, "session": d}))
-    if not url:
-        print(f"studio: server did not start within {SERVER_START_SECONDS} s, see "
-              f"{os.path.join(d, 'server.log')}", file=sys.stderr)
-        return 1
-    return 0
+    return started(d, {"round": n})
 
 
 def resolved(d, session, entry):
@@ -897,10 +1079,28 @@ def resolved(d, session, entry):
     return out
 
 
+def answers_result(qset):
+    return {"action": "answers", "id": qset["id"],
+            "answers": [{"header": q["header"], "question": q["question"],
+                         "answer": a["answer"], "other": a["other"]}
+                        for q, a in zip(qset["questions"], qset["answers"])]}
+
+
 def wait(args):
     d = require_session(args)
     deadline = time.monotonic() + args.timeout
     while True:
+        with locked(d):
+            session = load_session(d)
+            answered = [q for q in session.get("questions", [])
+                        if q.get("answers") is not None and not q.get("consumed")]
+            if answered:
+                qset = min(answered, key=lambda q: q.get("id", 0))
+                qset["consumed"] = True
+                save_session(d, session)
+        if answered:
+            print(json.dumps(answers_result(qset)))
+            return 0
         with locked(d):
             session = load_session(d)
             pending = [e for e in session.get("feedback", []) if not e.get("consumed")]
@@ -984,8 +1184,17 @@ def main(argv):
     p.add_argument("--parent", type=int)
     p.add_argument("--request-file")
     p.add_argument("--modality", choices=MODALITIES)
+    p.add_argument("--extra", action="append", default=[], metavar="LABEL=USD",
+                   help="a cost besides the generation (critic, voice-over, music); repeatable")
 
-    p = sub.add_parser("wait", help="block until feedback or accept")
+    p = sub.add_parser("ask", help="add a question set for the user to answer in the page")
+    p.add_argument("--session", default=default)
+    p.add_argument("--questions-file", required=True)
+    p.add_argument("--message-file")
+    p.add_argument("--request-file")
+    p.add_argument("--modality", choices=MODALITIES)
+
+    p = sub.add_parser("wait", help="block until answers, feedback or accept")
     p.add_argument("--session", default=default)
     p.add_argument("--timeout", type=float, default=3600)
 
@@ -997,7 +1206,8 @@ def main(argv):
     try:
         if args.verb == "serve":
             return serve(require_session(args), args.no_open, args.idle_minutes)
-        return {"push": push, "wait": wait, "stop": stop, "status": status}[args.verb](args)
+        return {"push": push, "ask": ask, "wait": wait, "stop": stop,
+                "status": status}[args.verb](args)
     except UsageError as e:
         print(f"studio: {e}", file=sys.stderr)
         return 2

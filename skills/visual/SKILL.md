@@ -27,13 +27,14 @@ standard Windows install), run the same command with `python`, or `py`.
    command. It injects one `[clouter visual]` block.
 2. **You interview.** Before the model question, fill a brief and ask
    only what it still lacks — see "Interview" below. Most detailed
-   requests need no questions at all.
-3. **The user picks.** After the interview, ask with
-   `AskUserQuestion` exactly as the block says (or as `interview.py rank`
-   printed, when an answer re-ranked the models): header "Model" (or one
-   question per modality in a single call, headers "SVG model", "Image
-   model", ...), Jev's pick first and marked Recommended, then cheap to
-   expensive, a price in every label, "Stay with Claude" last. Never twice
+   requests need no questions at all. Questions go to the studio page,
+   not the terminal — see "Asking the user".
+3. **The user picks.** After the interview, ask in the studio exactly as
+   the block says (or as `interview.py rank` printed, when an answer
+   re-ranked the models): header "Model" (or one question per modality
+   in a single question set, headers "SVG model", "Image model", ...),
+   Jev's pick first and marked Recommended, then cheap to expensive, a
+   price in every label, "Stay with Claude" last. Never twice
    for one prompt.
 4. **You check the model's own fields.** Before generate.py, run:
 
@@ -176,8 +177,8 @@ message, written verbatim to a temp file, as described above.
 
 The prompt a generation model gets decides the result, and a short
 request leaves most of it to chance. The interview closes the gaps that
-matter before any credit is spent, and nothing else: one
-`AskUserQuestion` call, at most 4 questions, often none.
+matter before any credit is spent, and nothing else: one question set
+in the studio ("Asking the user"), at most 4 questions, often none.
 
 **Fill the brief.** Write a JSON file in the scratchpad or a temp
 directory, one per format:
@@ -218,13 +219,13 @@ the model choice first. An empty `ask` means no interview — go straight
 to the model question.
 
 **Ask once.** Every entry in `ask` is one question in a single
-`AskUserQuestion` call: its `header` and `question`, your inferred value
+question set: its `header` and `question`, your inferred value
 (or your best guess) first and marked "(Recommended)", then up to three
 of its `options` rewritten for this request. A `cost: true` slot
 (duration, audio, quality) says in the label that the choice costs more.
 With more than one format, split `--max` so the whole interview stays at
 4 questions. When no asked slot is in `rerank_if_answered`, the model
-question(s) may go into the same call, still 4 questions in all. Write
+question(s) may go into the same set, still 4 questions in all. Write
 every answer back into the brief with source `answered`; "Other" text is
 the user's own words, keep it verbatim.
 
@@ -246,14 +247,59 @@ guess can still be corrected in the studio. The file `compile` writes
 from it is what `--prompt-file`, `critique.py --prompt-file` and `studio.py
 push --brief-file` take.
 
+# Asking the user
+
+Every question this skill asks — the interview, the model pick, a model
+that turned out unusable, a mid-loop choice such as a provider refusing
+an input — goes to the studio page as a question set, so the whole
+session's history is in one place and the user never has to come back
+to the terminal to answer. Write the questions in `AskUserQuestion`'s
+own shape (1 to 4 questions, 2 to 4 options each; the page adds
+"Other" to every question by itself) to a JSON file:
+
+```json
+{"questions": [{"header": "Colours", "question": "Which colours?", "multiSelect": false,
+                "options": [{"label": "Brand blue (Recommended)", "description": "#58a6ff from the README"},
+                            {"label": "Monochrome", "description": ""}]}]}
+```
+
+```bash
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/visual/studio.py" ask \
+  --questions-file <questions.json> [--message-file <note.txt>] \
+  [--session <session dir>] [--request-file <path> --modality <modality>]
+# prints {"questions", "url", "session"} — tell the user the url once
+python3 "${CLAUDE_PLUGIN_ROOT}/skills/visual/studio.py" wait --session <session dir>
+```
+
+The first `ask` of a request has no `--session` and needs
+`--request-file`/`--modality`; it creates the session and opens the page.
+Keep its `session` dir and pass `--session <dir>` to every later `ask`
+and `push`, so the questions and the rounds share one history. With more
+than one format (an SVG and a PNG), every format's rounds go into that
+one session, and every `push` carries its own `--modality`: the round
+keeps it, so model suggestions and the catalogue stay per format.
+`--message-file` is a short note shown above the questions ("Seedance
+refused the input frame; how should the calm shot be made?"). Run `wait`
+in the background as in the studio loop; answers come back on exit 0
+with `"action": "answers"` and one entry per question: `answer` is the
+picked label (a list for `multiSelect`, null when the user typed their
+own), `other` the user's own text, verbatim. Treat a picked label
+exactly as the same answer in the terminal would be treated.
+
+Fall back to `AskUserQuestion` in the terminal, with the same questions,
+only when `ask` exits non-zero (the server did not start) or the user
+says the page won't open for them. The one question that always stays in
+the terminal is the key setup ("Setup, once"): it comes before any
+session exists.
+
 # Studio loop
 
 The default after a model choice, for raster_image, vector_svg, video and
 speech: every round goes into `skills/visual/studio.py`'s localhost page
 (spec: `skills/visual/studio.py`'s own docstring and `session.json` shape)
-instead of Claude judging or reporting a single file. Keep a running total
-of `cost` from every `generate.py` and `critique.py` call as you go — the
-studio's own `session.json` never sums it for you.
+instead of Claude judging or reporting a single file. The page header
+shows the session's running total, summed from every round's `--cost`
+and `--extra` amounts, so everything paid for belongs on some round.
 
 **Push the first round.**
 
@@ -281,9 +327,11 @@ Then push and wait, in the background:
 
 ```bash
 python3 "${CLAUDE_PLUGIN_ROOT}/skills/visual/studio.py" push \
+  --session <session dir from the interview> \
   --file <path> --model <chosen id> --cost <cost> --brief-file <brief> \
   --request-file <path to the user's request> --modality <modality> \
-  [--defects-file <defects.json>] [--message-file <note.txt>]
+  [--defects-file <defects.json>] [--message-file <note.txt>] \
+  [--extra "<label>=<usd>" ...]
 # prints {"round", "url", "session"} — tell the user the url once
 python3 "${CLAUDE_PLUGIN_ROOT}/skills/visual/studio.py" wait --session <session dir>
 ```
@@ -292,15 +340,19 @@ python3 "${CLAUDE_PLUGIN_ROOT}/skills/visual/studio.py" wait --session <session 
 shown in the page as a "Claude" message to explain what changed since the last
 round.
 
-`--cost` here is that round's `generate.py` cost only — a `critique.py
---translate` or `--suggest` call has its own `cost` and does not go into
-`push --cost`, but it still belongs in the running total you keep and
-report at accept.
+`--cost` here is that round's `generate.py` cost only. Everything else
+this round paid for goes in as `--extra "<label>=<usd>"`, one per call:
+`critique.py --suggest` or `--translate` (`"critic=0.004"`), a speech
+line, a music track, a paid generation that failed validation. The page
+lists them per round under the total. Without `--session`, `push` starts
+a new session — only right for a request that had no questions at all.
 
 Run `wait` with a long Bash timeout (it defaults to a 3600 s poll and only
 returns on feedback, accept, its own timeout or a dead server) and handle
 its exit code:
 
+- **0, answers.** `"action": "answers"`: the user answered a question
+  set; see "Asking the user". Act on the answers, then `wait` again.
 - **0, feedback.** Its JSON (`annotation`, `notes`, `markers[].frame`,
   `text`, `accepted_defects`, `branch_from`, `round`, `round_file`, `model`)
   is one feedback entry. `model` (when present) is the model id the user
@@ -345,8 +397,8 @@ its exit code:
   model unless the user's `text` names another — then use that model
   without asking again (naming it in the feedback is the choice); still
   spec-check it (step 3, "You check the model's own fields") and run the
-  reference check below against it. Only ask again (a fresh
-  `AskUserQuestion`) when `text` asks for "a different model" without
+  reference check below against it. Only ask again (a fresh question
+  set in the studio) when `text` asks for "a different model" without
   naming one. For raster_image/vector_svg, pass `--reference <base
   round_file>` only when the model in play — the one just picked, or the
   round's own model when it wasn't switched — takes an image input: run
@@ -375,7 +427,7 @@ its exit code:
   and `--defects-file` again for raster/vector, then `wait` again.
 - **10, accept.** Report the accepted round's original output path (the
   `path` you kept from that round's `generate.py` call, not the copy under
-  `rounds/`) and the running cost total across every round. Then run
+  `rounds/`) and the running cost total the page header shows. Then run
   `studio.py stop --session <session dir>`. `wait` returns 10 immediately
   on a session that is already accepted, so re-running it after a lost
   result — a dropped connection, a restart — is always safe, never a
@@ -435,7 +487,8 @@ running setup at all.
 Exit 6 from generate.py (model unusable: HTTP 403 upstream, e.g. an 18+
 attestation the account lacks) prints the upstream message to the user in one
 line, drops that model from the ranked choice, and asks once more with the
-remaining models; if none remain, say so and stop. This is the one exception
+remaining models, as a question set in the studio; if none remain, say
+so and stop. This is the one exception
 to "do not ask twice for the same prompt", because the first answer turned
 out impossible, not declined.
 

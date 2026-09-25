@@ -63,10 +63,16 @@ next request to that model goes right the first time.
 
 ## The studio
 
-Every generated image, SVG, video or speech clip opens in a browser page
-on `127.0.0.1`. In the page you can:
+Every request opens a browser page on `127.0.0.1`, from the first
+question to the accepted file. In the page you can:
 
+- answer Claude's questions (the details a request leaves open, which
+  model to use) as multiple-choice cards with your own "Other" answer,
+  so the whole conversation stays in the page's history instead of the
+  terminal
 - see each round and the critic's summary of it
+- see what the session has cost so far in the header, with a per-round
+  breakdown of generation, critic, voice-over and music
 - edit an image with a pen tool (colour and line width), an eraser, and
   numbered note pins
 - mark up video or audio with timeline markers and notes
@@ -82,6 +88,9 @@ sequenceDiagram
     participant Claude
     participant Models
 
+    Claude->>Studio: ask questions
+    You->>Studio: answer
+    Studio-->>Claude: wait returns with answers
     Claude->>Studio: push round
     Studio-->>You: show round and critic notes
     You->>Studio: send feedback
