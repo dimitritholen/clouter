@@ -372,14 +372,22 @@ its exit code:
 
   `--prompt-file`/`--request-file` ground a vague pointer ("the purple
   icon") in what was actually asked for; skipping them leaves the
-  translator guessing at the picture.
+  translator guessing at the picture. This is the same call for video: the
+  round's video file is `<round_file>` (the positional argument), its
+  markers go in `--frames-file`, and `--text-file` joins them when `text`
+  is also set — a marker's captured frame, if it has one, is sent to the
+  critic as an image like any other.
 
   Then rewrite the brief yourself, in the user's own words, from three
   things: `text` as given, the defects in that round's `defects` list (in
   `session.json`, via `studio.py status` or the round data `wait` already
   gave you) whose `id` is in `accepted_defects`, and `instructions.json`'s
   `instructions` list when you ran `--translate`. Do not paraphrase away
-  what the user actually typed.
+  what the user actually typed. For video, fold each translated marker
+  instruction into the new prompt as a timestamped line built from its
+  `where` (the marker's time) and `instruction` — "at 0:03, ..." — the
+  same shape as an untranslated marker's `text` below; its `box` names a
+  spot on the captured frame and plays no part in the video prompt.
 
   Image models do not understand negation: a fix that says what to remove
   states it, and the model paints it anyway ("a pen nib, not an anchor"
@@ -413,8 +421,11 @@ its exit code:
   6` already prints per entry. Otherwise regenerate from the rewritten
   brief alone. Never pass the annotation layer itself as `--reference` —
   it is feedback, not source material. Video and speech never take
-  `--suggest` or `--reference`: a marker's `text` becomes a timestamped
-  instruction in the new prompt instead ("at 0:03, ...").
+  `--suggest` or `--reference`. Every speech marker, and a video round's
+  markers when `--translate` wasn't run at all (no marker had a `frame`,
+  and there was no `annotation` or `notes` either), never reach the
+  translator — fold each one's own `text` into the new prompt as a
+  timestamped line instead ("at 0:03, ...").
 
   Instructions about tooling in the feedback — switch model, use a round
   as reference, try again cheaper — are acted on directly, never written
