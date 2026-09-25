@@ -13,7 +13,7 @@ trap 'rm -rf "$work"; [ -n "${server_pid:-}" ] && kill "$server_pid" 2>/dev/null
 # Stand-in for /api/alpha/decisions and /v1/systemone: answers every
 # question by its type, appends each request to requests.jsonl, returns 500
 # while the state says "boom", and 500 once then 200 when it says "flaky".
-python3 - "$work" <<'EOF_SERVER' &
+python3 - "$work" <<'EOF_SERVER' 2>"$work/server.err" &
 import json, sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -59,13 +59,18 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(out)
 
+import socketserver
+def _bind(self):  # HTTPServer.server_bind reverse-resolves the host (getfqdn): 35s on a macOS runner
+    socketserver.TCPServer.server_bind(self)
+    self.server_name, self.server_port = self.server_address[:2]
+HTTPServer.server_bind = _bind
 server = HTTPServer(("127.0.0.1", 0), Handler)
 open(f"{work}/port", "w").write(str(server.server_port))
 server.serve_forever()
 EOF_SERVER
 server_pid=$!
-for _ in $(seq 50); do [ -s "$work/port" ] && break; sleep 0.1; done
-[ -s "$work/port" ] || { printf 'FAIL stand-in server did not start\n'; exit 1; }
+for _ in $(seq 300); do [ -s "$work/port" ] && break; sleep 0.1; done
+[ -s "$work/port" ] || { printf 'FAIL stand-in server did not start: %s\n' "$(tr "\n" " " < "$work/server.err" 2>/dev/null)"; exit 1; }
 base="http://127.0.0.1:$(cat "$work/port")"
 
 export CLOUTER_CREDENTIALS="$work/credentials"
@@ -78,7 +83,7 @@ py() { # python snippet with lib importable -> stdout in $out, exit in $code
 check_code() { if [ "$2" -eq "$3" ]; then printf 'ok   %s\n' "$1"; else printf 'FAIL %s (exit %s, want %s): %s\n' "$1" "$2" "$3" "$(cat "$work/stderr")"; fail=1; fi; }
 check_eq() { if [ "$2" = "$3" ]; then printf 'ok   %s\n' "$1"; else printf 'FAIL %s (got %s, want %s)\n' "$1" "$2" "$3"; fail=1; fi; }
 last_request() { tail -n 1 "$work/requests.jsonl"; }
-requests_count() { [ -f "$work/requests.jsonl" ] && wc -l < "$work/requests.jsonl" || echo 0; }
+requests_count() { [ -f "$work/requests.jsonl" ] && wc -l < "$work/requests.jsonl" | tr -d " " || echo 0; }
 
 # --- keys -----------------------------------------------------------------
 
@@ -89,7 +94,7 @@ check_eq "missing key is MissingKey" "$(grep -c '^lib.keys.MissingKey: ' "$work/
 
 py 'from lib import keys; print(keys.set("OPENROUTER_API_KEY", "file-key"))'
 check_code "set writes the file" "$code" 0
-check_eq "file mode is 0600" "$(stat -c %a "$work/credentials")" "600"
+check_eq "file mode is 0600" "$(stat -c %a "$work/credentials" 2>/dev/null || stat -f %Lp "$work/credentials")" "600"
 check_eq "file holds NAME=value" "$(cat "$work/credentials")" "OPENROUTER_API_KEY=file-key"
 
 py 'from lib import keys; print(keys.get("OPENROUTER_API_KEY"))'
@@ -106,7 +111,7 @@ check_eq "plain env beats its EVAL_ fallback" "$out" "plain-key"
 
 py 'from lib import keys; keys.set("OTHER", "x"); keys.set("OPENROUTER_API_KEY", "new-key")'
 check_eq "set replaces its line and keeps the rest" "$(sort "$work/credentials" | tr '\n' ' ')" "OPENROUTER_API_KEY=new-key OTHER=x "
-check_eq "set keeps mode 0600" "$(stat -c %a "$work/credentials")" "600"
+check_eq "set keeps mode 0600" "$(stat -c %a "$work/credentials" 2>/dev/null || stat -f %Lp "$work/credentials")" "600"
 
 py 'from lib import keys; print(keys.find("NOPE"))'
 check_eq "find returns None for an absent key" "$out" "None"
@@ -117,6 +122,8 @@ check_code "0644 file refused" "$code" 1
 check_eq "refusal names mode and fix" "$(grep -c 'mode 0644.*chmod 600' "$work/stderr")" "1"
 OPENROUTER_API_KEY=env-key py 'from lib import keys; print(keys.get("OPENROUTER_API_KEY"))'
 check_eq "env key skips the loose file" "$out" "env-key"
+py 'from lib import keys; keys.os.name = "nt"; print(keys.get("OPENROUTER_API_KEY"))'
+check_eq "Windows (os.name nt): no POSIX mode check, file key read" "$out" "new-key"
 chmod 600 "$work/credentials"
 
 # --- jev ------------------------------------------------------------------

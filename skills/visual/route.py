@@ -51,6 +51,9 @@ import tempfile
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+# The interpreter name the injected commands use: a standard Windows
+# install has python and py, no python3.
+PY = "python" if os.name == "nt" else "python3"
 sys.path.insert(0, os.path.dirname(os.path.dirname(HERE)))
 sys.path.insert(0, HERE)
 from lib import jev, keys  # noqa: E402
@@ -134,7 +137,7 @@ def context(prompt, picks, transparent=False, request_path=None):
 
     def command(modality):
         extra = " --transparent" if transparent and modality == "raster_image" else ""
-        return (f"python3 \"{generate}\" --model <chosen id> --modality {modality} "
+        return (f"{PY} \"{generate}\" --model <chosen id> --modality {modality} "
                 f"--prompt-file <path to the design brief>{extra}{request_flag} --no-critique "
                 "[--out <path named in the prompt>]")
 
@@ -144,10 +147,10 @@ def context(prompt, picks, transparent=False, request_path=None):
         The loop itself (feedback vs accept vs timeout vs server gone) lives in SKILL.md,
         not here."""
         visual = modality in ("raster_image", "vector_svg")
-        suggest = (f"; python3 \"{critique}\" <file> --prompt-file <path to the design brief> "
+        suggest = (f"; {PY} \"{critique}\" <file> --prompt-file <path to the design brief> "
                    "--suggest --model <chosen id> --out <defects.json>") if visual else ""
         defects = " --defects-file <defects.json>" if visual else ""
-        push = (f"python3 \"{studio}\" push --file <file> --model <chosen id> --cost <cost> "
+        push = (f"{PY} \"{studio}\" push --file <file> --model <chosen id> --cost <cost> "
                 f"--brief-file <path to the design brief> --request-file <path> "
                 f"--modality {modality}{defects} [--message-file <note>]")
         return (f"{suggest}; then {push}; then `studio.py wait --session <dir>` in the "
@@ -156,9 +159,9 @@ def context(prompt, picks, transparent=False, request_path=None):
     def studio_steps_generic():
         """Same tail as studio_steps(), worded for the multi-format block where the
         modality varies per question rather than being known up front."""
-        return (f"; for raster_image/vector_svg formats also run python3 \"{critique}\" "
+        return (f"; for raster_image/vector_svg formats also run {PY} \"{critique}\" "
                 "<file> --prompt-file <brief> --suggest --model <chosen id> --out <defects.json>; then run "
-                f"python3 \"{studio}\" push --file <file> --model <chosen id> --cost <cost> "
+                f"{PY} \"{studio}\" push --file <file> --model <chosen id> --cost <cost> "
                 "--brief-file <brief> --request-file <path> --modality <its --modality> "
                 "(--defects-file <defects.json> for raster/vector) [--message-file <note>]; then run `studio.py wait "
                 "--session <dir>` per push in the background and follow the \"Studio loop\" "
@@ -169,15 +172,15 @@ def context(prompt, picks, transparent=False, request_path=None):
     def interview_instruction(modality):
         return (f"Before anything else, run the interview (\"Interview\" in SKILL.md): fill a "
                 f"brief JSON for {modality} from the request and the repo, keeping the user's own "
-                f"words (slots: python3 \"{interview}\" slots {modality}), run python3 "
+                f"words (slots: {PY} \"{interview}\" slots {modality}), run {PY} "
                 f"\"{interview}\" gaps --brief <brief.json>, and ask every question it lists in "
                 "one AskUserQuestion call, your inferred value first and marked Recommended; "
                 "none listed means no interview. If an answer lands on a slot in its "
-                f"rerank_if_answered, run python3 \"{interview}\" rank --brief <brief.json> and "
+                f"rerank_if_answered, run {PY} \"{interview}\" rank --brief <brief.json> and "
                 "offer its options in place of the list below.")
 
     brief_instruction = (
-        f"compile the brief: python3 \"{interview}\" compile --brief <brief.json> --out "
+        f"compile the brief: {PY} \"{interview}\" compile --brief <brief.json> --out "
         "<path to the design brief> --remember, and add the flags it prints to the command."
     )
 
@@ -316,7 +319,7 @@ def main():
                  "AskUserQuestion whether to store one now or carry on without; \"without\" only "
                  "means no nudge on ordinary prompts this session — offer again once if the user "
                  "later explicitly asks to generate a file, or if generate.py or critique.py "
-                 "exits 3. To store one, run python3 \"" + os.path.join(HERE, "setup-key.py") +
+                 "exits 3. To store one, run " + PY + " \"" + os.path.join(HERE, "setup-key.py") +
                  "\" in the background and show the user both links from its stderr JSON line: "
                  "the url to open, and the paste_url for a machine the browser can't reach "
                  "(WSL2, remote). /clouter:visual setup does the same later.")

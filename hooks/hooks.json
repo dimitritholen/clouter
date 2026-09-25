@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 \"${CLAUDE_PLUGIN_ROOT}/skills/visual/route.py\"",
+            "command": "for p in python3 python py; do \"$p\" -c '' </dev/null 2>/dev/null && exec \"$p\" \"${CLAUDE_PLUGIN_ROOT}/skills/visual/route.py\"; done; exit 0",
             "timeout": 10
           }
         ]

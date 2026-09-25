@@ -75,7 +75,7 @@ check_eq "compile: exact text quoted" "$(grep -c 'reads exactly "Clouter"' "$wor
 check_eq "compile: transparent background gives --transparent and the aspect" "$(printf '%s' "$out" | jq -r '.flags | join(" ")')" "--transparent --aspect 16:9"
 check_eq "compile: quality becomes a spec hint" "$(printf '%s' "$out" | jq -r '.spec_hints["resolution/size"]')" "High resolution"
 check_eq "compile --remember: palette and style stored" "$(printf '%s' "$out" | jq -r '.stored | sort | join(",")')" "palette,style"
-check_eq "prefs file mode 0600" "$(stat -c %a "$CLOUTER_PREFS")" "600"
+check_eq "prefs file mode 0600" "$(stat -c %a "$CLOUTER_PREFS" 2>/dev/null || stat -f %Lp "$CLOUTER_PREFS")" "600"
 
 brief '{"modality": "raster_image", "slots": {"subject": "a cat", "text": "none"}}'
 compile >/dev/null
@@ -91,7 +91,7 @@ mkdir -p "$work/other"
 check_eq "remembered: other project starts empty" "$(python3 "$SCRIPT" gaps --brief "$work/brief.json" --project "$work/other" | jq -c '.remembered')" "{}"
 brief '{"modality": "raster_image", "slots": {"subject": "a cat", "palette": {"value": "red", "source": "inferred"}}}'
 compile --remember >/dev/null
-check_eq "remember: an inferred value is not stored" "$(jq -r --arg p "$(realpath "$project")" '.[$p].palette.value' "$CLOUTER_PREFS")" "#0d1117 and #58a6ff"
+check_eq "remember: an inferred value is not stored" "$(jq -r --arg p "$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$project")" '.[$p].palette.value' "$CLOUTER_PREFS")" "#0d1117 and #58a6ff"
 
 # --- compile: video and speech ---
 brief '{"modality": "video", "slots": {"subject": "a paper boat", "action": "drifts down a gutter",

@@ -1,6 +1,6 @@
 {
   "name": "clouter",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "routes image, SVG, video and speech prompts to Jev-ranked OpenRouter models",
   "author": {
     "name": "Dimitri Tholen",

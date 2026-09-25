@@ -24,7 +24,7 @@ Session directory:
     <dir>/server.log     stdout/stderr of a server started by `push`
 
 Every read-modify-write of session.json holds <dir>/session.lock
-(fcntl.flock) so the server and a `wait` in another process never lose
+(fcntl.flock; msvcrt.locking on Windows) so the server and a `wait` in another process never lose
 each other's writes.
 
 The server binds 127.0.0.1 on a free port (ThreadingHTTPServer) and
@@ -64,7 +64,6 @@ arguments, errors on stderr. Stdlib only.
 import argparse
 import contextlib
 import datetime
-import fcntl
 import http.server
 import json
 import mimetypes
@@ -72,6 +71,7 @@ import os
 import re
 import shutil
 import signal
+import socketserver
 import subprocess
 import sys
 import threading
@@ -79,6 +79,16 @@ import time
 import urllib.parse
 import uuid
 import webbrowser
+
+try:
+    import fcntl
+except ImportError:  # Windows
+    fcntl = None
+    import msvcrt
+
+# Popen kwargs that detach a child from this process's session/console.
+DETACH = ({"creationflags": subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP}
+          if os.name == "nt" else {"start_new_session": True})
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 STATIC_DIR = os.path.join(HERE, "studio")
@@ -132,11 +142,32 @@ def locked(d):
     """Serialise read-modify-writes of session.json across threads and processes."""
     with _thread_lock:
         with open(os.path.join(d, "session.lock"), "a") as fh:
-            fcntl.flock(fh, fcntl.LOCK_EX)
+            _lock(fh)
             try:
                 yield
             finally:
-                fcntl.flock(fh, fcntl.LOCK_UN)
+                _unlock(fh)
+
+
+def _lock(fh):
+    if fcntl:
+        fcntl.flock(fh, fcntl.LOCK_EX)
+        return
+    fh.seek(0)
+    while True:  # LK_LOCK gives up after ~10s; keep waiting, as flock does
+        try:
+            msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+            return
+        except OSError:
+            continue
+
+
+def _unlock(fh):
+    if fcntl:
+        fcntl.flock(fh, fcntl.LOCK_UN)
+        return
+    fh.seek(0)
+    msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
 
 
 def write_json_atomic(path, data):
@@ -166,6 +197,8 @@ def read_server(d):
 
 
 def pid_alive(pid):
+    if os.name == "nt":
+        return _pid_alive_windows(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -674,6 +707,20 @@ def build_entry(d, session, action, body, catalogue_ids=None):
     }
 
 
+def _pid_alive_windows(pid):
+    """os.kill(pid, 0) on Windows sends CTRL_C_EVENT, so ask the kernel."""
+    import ctypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+    if not handle:
+        return ctypes.get_last_error() == 5  # ERROR_ACCESS_DENIED: exists, not ours
+    try:
+        code = ctypes.c_ulong()
+        return bool(kernel32.GetExitCodeProcess(handle, ctypes.byref(code))) and code.value == 259  # STILL_ACTIVE
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def open_browser(url):
     """Best effort; never raises."""
     try:
@@ -684,8 +731,7 @@ def open_browser(url):
     if wsl:
         for cmd in (["wslview", url], ["explorer.exe", url]):
             try:
-                subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                 start_new_session=True)
+                subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **DETACH)
                 return
             except OSError:
                 continue
@@ -695,12 +741,20 @@ def open_browser(url):
         print(f"studio: could not open a browser: {e}", file=sys.stderr)
 
 
+class LocalServer(http.server.ThreadingHTTPServer):
+    def server_bind(self):
+        # HTTPServer.server_bind reverse-resolves the host (socket.getfqdn),
+        # which takes ~35s on a Mac with slow DNS, past SERVER_START_SECONDS.
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = self.server_address[:2]
+
+
 def serve(d, no_open, idle_minutes):
     if not os.path.isfile(session_path(d)):
         raise UsageError(f"no session at {d}")
     studio = Studio(d, idle_minutes)
     handler = type("StudioHandler", (Handler,), {"studio": studio})
-    httpd = http.server.ThreadingHTTPServer(("127.0.0.1", 0), handler)
+    httpd = LocalServer(("127.0.0.1", 0), handler)
     httpd.daemon_threads = True
     httpd.block_on_close = False
     port = httpd.server_address[1]
@@ -750,8 +804,7 @@ def start_server(d):
     if os.environ.get("CLOUTER_STUDIO_NO_OPEN") == "1":
         cmd.append("--no-open")
     with open(os.path.join(d, "server.log"), "ab") as log:
-        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=log, stderr=log,
-                                start_new_session=True)
+        proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=log, stderr=log, **DETACH)
     deadline = time.monotonic() + SERVER_START_SECONDS
     while time.monotonic() < deadline:
         info = read_server(d)
@@ -879,14 +932,14 @@ def stop(args):
     d = require_session(args, need_file=False)
     info = read_server(d)
     if info and pid_alive(info["pid"]):
-        with contextlib.suppress(ProcessLookupError):
+        with contextlib.suppress(OSError):  # ProcessLookupError; a plain OSError on Windows
             os.kill(info["pid"], signal.SIGTERM)
         deadline = time.monotonic() + 3
         while pid_alive(info["pid"]) and time.monotonic() < deadline:
             time.sleep(0.05)
         if pid_alive(info["pid"]):
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(info["pid"], signal.SIGKILL)
+            with contextlib.suppress(OSError):
+                os.kill(info["pid"], getattr(signal, "SIGKILL", signal.SIGTERM))  # no SIGKILL on Windows
     with contextlib.suppress(OSError):
         os.remove(server_path(d))
     return 0

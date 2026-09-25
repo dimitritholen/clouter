@@ -16,7 +16,7 @@ GOOD_KEY="sk-or-v1-testsecret0123456789"
 # Stand-in OpenRouter: POST /api/v1/auth/keys checks the code and that the
 # verifier hashes to the challenge the test read from the auth URL; GET
 # /api/v1/key accepts only GOOD_KEY. Every request lands in requests.jsonl.
-python3 - "$work" "$GOOD_KEY" <<'EOF_SERVER' &
+python3 - "$work" "$GOOD_KEY" <<'EOF_SERVER' 2>"$work/server.err" &
 import base64, hashlib, json, os, sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -63,13 +63,18 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self.reply(403, {"error": {"code": 403, "message": "Invalid code or code_verifier"}})
 
+import socketserver
+def _bind(self):  # HTTPServer.server_bind reverse-resolves the host (getfqdn): 35s on a macOS runner
+    socketserver.TCPServer.server_bind(self)
+    self.server_name, self.server_port = self.server_address[:2]
+HTTPServer.server_bind = _bind
 server = HTTPServer(("127.0.0.1", 0), Handler)
 open(f"{work}/port", "w").write(str(server.server_port))
 server.serve_forever()
 EOF_SERVER
 server_pid=$!
-for _ in $(seq 50); do [ -s "$work/port" ] && break; sleep 0.1; done
-[ -s "$work/port" ] || { printf 'FAIL stand-in server did not start\n'; exit 1; }
+for _ in $(seq 300); do [ -s "$work/port" ] && break; sleep 0.1; done
+[ -s "$work/port" ] || { printf 'FAIL stand-in server did not start: %s\n' "$(tr "\n" " " < "$work/server.err" 2>/dev/null)"; exit 1; }
 export OPENROUTER_BASE_URL="http://127.0.0.1:$(cat "$work/port")"
 export CLOUTER_CREDENTIALS="$work/credentials"
 unset OPENROUTER_API_KEY BROWSER
@@ -102,7 +107,7 @@ check_eq "callback page says done" "$(printf '%s' "$page" | grep -c 'The key is 
 finish
 check_code "good code: stored" "$code" 0
 check_eq "stdout says stored via oauth" "$(jq -c '[.status, .via]' "$work/stdout")" '["stored","oauth"]'
-check_eq "file mode 0600" "$(stat -c %a "$work/credentials")" "600"
+check_eq "file mode 0600" "$(stat -c %a "$work/credentials" 2>/dev/null || stat -f %Lp "$work/credentials")" "600"
 check_eq "file holds the key" "$(cat "$work/credentials")" "OPENROUTER_API_KEY=$GOOD_KEY"
 key_absent "key absent from stdout and stderr (oauth)"
 check_eq "exchange then key check" "$(jq -r '.method + " " + .path' "$work/requests.jsonl" | tr '\n' ';')" "POST /api/v1/auth/keys;GET /api/v1/key;"
@@ -141,7 +146,7 @@ finish
 check_code "paste: stored" "$code" 0
 check_eq "stdout says stored via paste" "$(jq -c '[.status, .via]' "$work/stdout")" '["stored","paste"]'
 check_eq "paste: file holds the key" "$(cat "$work/credentials")" "OPENROUTER_API_KEY=$GOOD_KEY"
-check_eq "paste: file mode 0600" "$(stat -c %a "$work/credentials")" "600"
+check_eq "paste: file mode 0600" "$(stat -c %a "$work/credentials" 2>/dev/null || stat -f %Lp "$work/credentials")" "600"
 key_absent "key absent from stdout and stderr (paste)"
 check_eq "paste: only the key check was called" "$(jq -r '.method + " " + .path' "$work/requests.jsonl" | tr '\n' ';')" "GET /api/v1/key;"
 
@@ -185,8 +190,8 @@ BROWSER="$work/fake-browser %s" "$SCRIPT" --timeout 1 >"$work/stdout" 2>"$work/s
 check_code "browser run: timed out as planned" "$code" 2
 check_eq "browser opened on the auth url" "$(cat "$work/opened-url" 2>/dev/null)" "$(jq -r .url "$work/stderr")"
 check_eq "browser_opened reported" "$(jq -r .browser_opened "$work/stderr")" "true"
-check_eq "stderr is one JSON line, no browser noise" "$(wc -l < "$work/stderr")" "1"
-check_eq "stdout is one JSON line, no browser noise" "$(wc -l < "$work/stdout")" "1"
+check_eq "stderr is one JSON line, no browser noise" "$(wc -l < "$work/stderr" | tr -d " ")" "1"
+check_eq "stdout is one JSON line, no browser noise" "$(wc -l < "$work/stdout" | tr -d " ")" "1"
 
 # --- --tty ---------------------------------------------------------------------------
 rm -f "$work/credentials" "$work/requests.jsonl"
